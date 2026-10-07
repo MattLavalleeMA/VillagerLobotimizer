@@ -1,6 +1,7 @@
 package dev.mja00.villagerLobotomizer.policy;
 
-import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.Timing;
+import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.GiftClock;
+import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.Step;
 import org.bukkit.loot.LootTables;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +12,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HeroGiftPolicyTest {
+
+    private static final long SCAN = HeroGiftPolicy.SCAN_INTERVAL_TICKS;
 
     @Test
     void candidateNeedsEffectViewRangeAndNonSpectator() {
@@ -29,46 +32,75 @@ class HeroGiftPolicyTest {
     }
 
     @Test
-    void timingFollowsTheRemainingCooldown() {
-        assertEquals(Timing.SCHEDULE_FIRST, HeroGiftPolicy.timing(null));
-        assertEquals(Timing.WAIT, HeroGiftPolicy.timing(1L));
-        assertEquals(Timing.GIVE, HeroGiftPolicy.timing(0L));
-        assertEquals(Timing.GIVE, HeroGiftPolicy.timing(-40L));
-        assertEquals(600L, HeroGiftPolicy.firstGiftCooldown());
+    void aNewClockStartsAtVanillasFirstGiftDelay() {
+        assertEquals(600L, new GiftClock().remainingTicks());
+    }
+
+    @Test
+    void firstSightingCreditsNothing() {
+        GiftClock clock = new GiftClock(300L);
+
+        assertEquals(Step.WAIT, HeroGiftPolicy.onSighting(clock, 5000L, true));
+        assertEquals(300L, clock.remainingTicks());
     }
 
     @Test
     void eachSightingCreditsAtMostOneScan() {
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, null, 5000L, 20L), "hero just came into view");
-        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4980L, 5000L, 20L));
-        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4960L, 5000L, 20L),
-                "a hidden scan in between is not credited");
-        assertEquals(290L, HeroGiftPolicy.countDown(300L, 4990L, 5000L, 20L), "a second hero's offset scan");
+        GiftClock clock = new GiftClock(300L);
+        HeroGiftPolicy.onSighting(clock, 1000L, true);
+
+        HeroGiftPolicy.onSighting(clock, 1020L, true);
+        assertEquals(280L, clock.remainingTicks());
+
+        HeroGiftPolicy.onSighting(clock, 1060L, true);
+        assertEquals(260L, clock.remainingTicks(), "a hidden scan in between is not credited");
+
+        HeroGiftPolicy.onSighting(clock, 1070L, true);
+        assertEquals(250L, clock.remainingTicks(), "a second hero's offset scan credits only the time between");
+
+        HeroGiftPolicy.onSighting(clock, 900_000L, true);
+        assertEquals(230L, clock.remainingTicks(), "a stale last-seen tick credits one scan");
+
+        HeroGiftPolicy.onSighting(clock, 1_000L, true);
+        assertEquals(230L, clock.remainingTicks(), "a tick from another world's clock credits nothing");
     }
 
     @Test
-    void countDownBoundsAStaleOrForeignTick() {
-        assertEquals(280L, HeroGiftPolicy.countDown(300L, 0L, 1_000_000L, 20L), "stale last-seen tick");
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, 9_000L, 1_000L, 20L),
-                "a last-seen tick from another world's clock credits nothing");
+    void readyVillagerFacesTheHeroThenGivesAfterTheHeadTurn() {
+        GiftClock clock = new GiftClock(SCAN);
+        HeroGiftPolicy.onSighting(clock, 1000L, true);
+
+        assertEquals(Step.FACE, HeroGiftPolicy.onSighting(clock, 1000L + SCAN, true), "cooldown just ran out");
+        assertEquals(0L, clock.remainingTicks());
+        assertEquals(Step.GIVE, HeroGiftPolicy.onSighting(clock, 1000L + SCAN + HeroGiftPolicy.HEAD_TURN_TICKS, true));
     }
 
     @Test
-    void countDownStopsAtZero() {
-        assertEquals(0L, HeroGiftPolicy.countDown(10L, 980L, 1000L, 20L));
-        assertEquals(0L, HeroGiftPolicy.countDown(0L, 980L, 1000L, 20L), "a ready gift stays ready");
+    void readyGiftWaitsForTheHeroToComeInRange() {
+        GiftClock clock = new GiftClock(0L);
+        assertEquals(Step.FACE, HeroGiftPolicy.onSighting(clock, 1000L, false));
+        assertEquals(Step.FACE, HeroGiftPolicy.onSighting(clock, 1020L, false), "hero in view but too far");
+        assertEquals(Step.FACE, HeroGiftPolicy.onSighting(clock, 1040L, false));
+
+        assertEquals(Step.GIVE, HeroGiftPolicy.onSighting(clock, 1060L, true), "already facing the hero");
     }
 
     @Test
-    void countDownCapsACorruptCooldown() {
-        assertEquals(HeroGiftPolicy.MAX_COOLDOWN_TICKS, HeroGiftPolicy.countDown(Long.MAX_VALUE, null, 0L, 20L));
+    void losingSightOfTheHeroRestartsTheHeadTurn() {
+        GiftClock clock = new GiftClock(0L);
+        HeroGiftPolicy.onSighting(clock, 1000L, true);
+
+        assertEquals(Step.FACE, HeroGiftPolicy.onSighting(clock, 1060L, true), "the hero was out of view in between");
+        assertEquals(Step.GIVE, HeroGiftPolicy.onSighting(clock, 1080L, true));
     }
 
     @Test
     void nextCooldownStaysWithinVanillaBounds() {
         Random random = new Random(42);
         for (int i = 0; i < 10_000; i++) {
-            long cooldown = HeroGiftPolicy.nextGiftCooldown(random);
+            GiftClock clock = new GiftClock(0L);
+            HeroGiftPolicy.startNextCooldown(clock, random);
+            long cooldown = clock.remainingTicks();
             assertTrue(cooldown >= 600L && cooldown <= 6600L, "cooldown " + cooldown);
         }
     }

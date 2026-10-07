@@ -63,7 +63,6 @@ public final class UninstallSweep {
     private final VillagerLobotomizer plugin;
     private final LobotomizedMarkerStore store;
     private final NamespacedKey lobotomizedKey;
-    private final NamespacedKey heroGiftCooldownKey;
     private final boolean silent;
     private final UUID requesterId;
     private final ChunkAccessor chunkAccessor;
@@ -107,7 +106,6 @@ public final class UninstallSweep {
         this.plugin = plugin;
         this.store = store;
         this.lobotomizedKey = new NamespacedKey(plugin, LobotomizeStorage.LOBOTOMIZED_KEY);
-        this.heroGiftCooldownKey = new NamespacedKey(plugin, LobotomizeStorage.HERO_GIFT_COOLDOWN_KEY);
         this.silent = plugin.getConfig().getBoolean("silent-lobotomized-villagers");
         this.requesterId = requesterId;
         this.chunkAccessor = chunkAccessor;
@@ -182,7 +180,6 @@ public final class UninstallSweep {
             villager.setSilent(false);
         }
         villager.getPersistentDataContainer().remove(this.lobotomizedKey);
-        villager.getPersistentDataContainer().remove(this.heroGiftCooldownKey);
         this.cleared.add(villager.getUniqueId());
         this.store.markerCleared(villager.getUniqueId());
         this.restored.incrementAndGet();

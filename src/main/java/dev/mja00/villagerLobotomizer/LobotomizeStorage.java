@@ -18,6 +18,7 @@ import java.util.stream.Stream;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -74,16 +75,14 @@ public class LobotomizeStorage {
 
     /** Shared so UninstallSweep can rebuild the key without depending on a live storage instance. */
     public static final String LOBOTOMIZED_KEY = "isLobotomized";
-    /** Ticks a lobotomized villager must still see a hero before its next gift. Shared with UninstallSweep. */
-    public static final String HERO_GIFT_COOLDOWN_KEY = "heroGiftCooldown";
 
     private final NamespacedKey lobotomizedKey;
-    private final NamespacedKey heroGiftCooldownKey;
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
-    /** Game tick each villager last saw a hero; each sighting credits at most one scan interval. */
-    private final Map<UUID, Long> heroLastSeenTicks = new ConcurrentHashMap<>();
+    private BiPredicate<Location, Location> throwPathClear = LobotomizeStorage::isThrowPathClear;
+    /** Each tracked villager's gift timer. Like vanilla's it is not saved, so it restarts whenever the villager loads. */
+    private final Map<UUID, HeroGiftPolicy.GiftClock> heroGiftClocks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
     private final NamespacedKey lastRestockCheckDayTimeKey;
     private final NamespacedKey lastRestockGameTimeKey;
@@ -216,7 +215,6 @@ public class LobotomizeStorage {
 
         this.key = new NamespacedKey(plugin, "lastRestock");
         this.lobotomizedKey = new NamespacedKey(plugin, LOBOTOMIZED_KEY);
-        this.heroGiftCooldownKey = new NamespacedKey(plugin, HERO_GIFT_COOLDOWN_KEY);
         this.lastRestockCheckDayTimeKey = new NamespacedKey(plugin, "lastRestockCheckDayTime");
         this.lastRestockGameTimeKey = new NamespacedKey(plugin, "lastRestockGameTime");
         // Use Paper's GlobalRegionScheduler for chunk processing. It never touches entities directly;
@@ -267,7 +265,7 @@ public class LobotomizeStorage {
      * @return {@code true} if the villager was being tracked, {@code false} otherwise
      */
     private boolean untrack(@NotNull Villager v) {
-        this.heroLastSeenTicks.remove(v.getUniqueId());
+        this.heroGiftClocks.remove(v.getUniqueId());
         synchronized (this.stateLock) {
             boolean wasActive = this.activeVillagers.remove(v);
             boolean wasInactive = this.inactiveVillagers.remove(v);
@@ -339,7 +337,7 @@ public class LobotomizeStorage {
     public final void removeVillager(@NotNull Villager villager) {
         boolean wasInactive;
         boolean wasActive;
-        this.heroLastSeenTicks.remove(villager.getUniqueId());
+        this.heroGiftClocks.remove(villager.getUniqueId());
         // Cancel the per-villager task and drop set membership atomically (paired with
         // scheduleVillagerTask) so a concurrent (re)schedule can't leave a live orphan task.
         synchronized (this.stateLock) {
@@ -386,10 +384,8 @@ public class LobotomizeStorage {
                 this.logger.info("[Debug] Removed persistent lobotomized marker from " + villager.getUniqueId());
             }
         }
-        // An awake villager gifts through vanilla AI again, so drop our cooldown along with the marker.
-        if (pdc.has(this.heroGiftCooldownKey, PersistentDataType.LONG)) {
-            pdc.remove(this.heroGiftCooldownKey);
-        }
+        // An awake villager gifts through vanilla AI again, so drop our timer along with the marker.
+        this.heroGiftClocks.remove(villager.getUniqueId());
         // Outside the guard on purpose: a row can outlive its marker when a chunk never saved, and
         // clearing one we do not hold is free.
         if (this.markerStore != null) {
@@ -941,12 +937,10 @@ public class LobotomizeStorage {
     }
 
     /**
-     * Counts a lobotomized villager's gift cooldown down while it can see the hero, and gives the gift
-     * once the cooldown is done and the hero is in vanilla's 5-block range. A villager whose cooldown
-     * finishes while the hero is further away keeps the gift until a hero comes close, since it cannot
-     * walk over the way vanilla's would. The gift is dropped at the hero's feet rather than thrown, so a
-     * trapped villager's throw cannot land inside its own cell. Must run on the thread owning both;
-     * a failure is logged so it can never stop the scan.
+     * Runs vanilla's gift sequence for a lobotomized villager that can see the hero: the cooldown
+     * runs down while it watches, then it turns toward the hero and throws the gift once the hero
+     * is in vanilla's 5-block range. Must run on the thread owning both; a failure is logged so it
+     * can never stop the scan.
      */
     void offerHeroGift(@NotNull Villager villager, @NotNull Player hero) {
         if (!this.heroGiftsEnabled) {
@@ -966,52 +960,79 @@ public class LobotomizeStorage {
                     || !this.heroVisibility.test(villager, hero)) {
                 return;
             }
-            PersistentDataContainer pdc = villager.getPersistentDataContainer();
-            long now = villager.getWorld().getGameTime();
-            Long lastSeen = this.heroLastSeenTicks.put(villager.getUniqueId(), now);
-            Long stored = pdc.get(this.heroGiftCooldownKey, PersistentDataType.LONG);
-            if (stored == null) {
-                pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
-                return;
-            }
-            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, HeroGiftPolicy.SCAN_INTERVAL_TICKS);
+            HeroGiftPolicy.GiftClock clock = this.heroGiftClocks.computeIfAbsent(villager.getUniqueId(),
+                    id -> new HeroGiftPolicy.GiftClock());
             boolean inRange = HeroGiftPolicy.withinThrowingDistance(
                     heroLocation.getBlockX() - villagerLocation.getBlockX(),
                     heroLocation.getBlockY() - villagerLocation.getBlockY(),
                     heroLocation.getBlockZ() - villagerLocation.getBlockZ());
-            if (HeroGiftPolicy.timing(remaining) != HeroGiftPolicy.Timing.GIVE || !inRange) {
-                if (remaining != stored) {
-                    pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, remaining);
-                }
+            HeroGiftPolicy.Step step = HeroGiftPolicy.onSighting(clock, villager.getWorld().getGameTime(), inRange);
+            if (step == HeroGiftPolicy.Step.WAIT) {
                 return;
             }
-            long cooldown = HeroGiftPolicy.nextGiftCooldown(this.random);
-            // Set before rolling, so a loot failure waits out a cooldown instead of retrying every scan.
-            pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, cooldown);
-            dropHeroGift(villager, hero, cooldown);
+            faceHero(villager, hero);
+            if (step != HeroGiftPolicy.Step.GIVE) {
+                return;
+            }
+            // Restart before rolling, so a loot failure waits out a cooldown instead of retrying every scan.
+            HeroGiftPolicy.startNextCooldown(clock, this.random);
+            deliverHeroGift(villager, hero, clock.remainingTicks());
         } catch (RuntimeException e) {
             this.logger.log(java.util.logging.Level.WARNING, e,
                     () -> "Could not give a hero gift from villager " + villager.getUniqueId());
         }
     }
 
-    private void dropHeroGift(@NotNull Villager villager, @NotNull Player hero, long cooldownTicks) {
+    /** Turns the villager's head toward the hero. Its AI is off, so nothing turns it back. */
+    private static void faceHero(@NotNull Villager villager, @NotNull Player hero) {
+        Location eyes = villager.getEyeLocation();
+        Vector toHero = hero.getEyeLocation().toVector().subtract(eyes.toVector());
+        if (toHero.lengthSquared() < 1.0E-6) {
+            return;
+        }
+        eyes.setDirection(toHero);
+        villager.setRotation(eyes.getYaw(), eyes.getPitch());
+    }
+
+    /**
+     * Throws the gift at the hero the way vanilla does, or, when the villager's cell would stop the
+     * throw, drops it at the hero's feet instead so it can never land inside the cell.
+     */
+    private void deliverHeroGift(@NotNull Villager villager, @NotNull Player hero, long cooldownTicks) {
         LootTables table = HeroGiftPolicy.giftTable(!villager.isAdult(), villager.getProfession().key().value());
         Collection<ItemStack> items = this.heroGiftLoot.roll(villager, table, this.random);
-        Location feet = hero.getLocation();
+        Location from = villager.getEyeLocation().subtract(0.0, HeroGiftPolicy.THROW_HEIGHT_BELOW_EYES, 0.0);
+        Location heroLocation = hero.getLocation();
+        boolean thrown = this.throwPathClear.test(from, heroLocation.clone().add(0.0, 1.0, 0.0));
+        Vector velocity = heroLocation.toVector().subtract(villager.getLocation().toVector());
+        velocity = velocity.lengthSquared() < 1.0E-6 ? new Vector() : velocity.normalize().multiply(HeroGiftPolicy.THROW_SPEED);
         for (ItemStack item : items) {
             if (item == null || item.isEmpty()) {
                 continue;
             }
-            // dropItem adds a random pop; zero it so the gift lands where the hero is standing.
-            hero.getWorld().dropItem(feet, item, dropped -> dropped.setVelocity(new Vector()));
+            if (thrown) {
+                Vector throwVelocity = velocity.clone();
+                villager.getWorld().dropItem(from, item, dropped -> dropped.setVelocity(throwVelocity));
+            } else {
+                // dropItem adds a random pop; zero it so the gift lands where the hero is standing.
+                hero.getWorld().dropItem(heroLocation, item, dropped -> dropped.setVelocity(new Vector()));
+            }
         }
         if (this.plugin.isDebugging()) {
             this.logger.log(java.util.logging.Level.INFO,
-                    "[Debug] Villager {0} gave a hero gift ({1}, {2} stack(s)) to {3}; next after {4} ticks with a hero in view",
-                    new Object[]{villager.getUniqueId(), table.name(), String.valueOf(items.size()), hero.getName(),
-                            String.valueOf(cooldownTicks)});
+                    "[Debug] Villager {0} {1} a hero gift ({2}, {3} stack(s)) to {4}; next after {5} ticks with a hero in view",
+                    new Object[]{villager.getUniqueId(), thrown ? "threw" : "dropped", table.name(),
+                            String.valueOf(items.size()), hero.getName(), String.valueOf(cooldownTicks)});
         }
+    }
+
+    private static boolean isThrowPathClear(@NotNull Location from, @NotNull Location to) {
+        Vector direction = to.toVector().subtract(from.toVector());
+        double distance = direction.length();
+        if (distance < 1.0E-6) {
+            return true;
+        }
+        return from.getWorld().rayTraceBlocks(from, direction, distance, FluidCollisionMode.NEVER, true) == null;
     }
 
     /** For /lobotomy debug: the villager's hero-gift status. Entity-thread only. */
@@ -1019,10 +1040,12 @@ public class LobotomizeStorage {
         if (!this.heroGiftsEnabled) {
             return "disabled in config";
         }
-        Long remaining = villager.getPersistentDataContainer().get(this.heroGiftCooldownKey, PersistentDataType.LONG);
-        if (remaining == null) {
-            return "no hero seen yet";
+        HeroGiftPolicy.GiftClock clock = this.heroGiftClocks.get(villager.getUniqueId());
+        if (clock == null) {
+            return "no hero seen since it loaded; first after " + HeroGiftPolicy.FIRST_GIFT_DELAY_TICKS
+                    + " ticks with a hero in view";
         }
+        long remaining = clock.remainingTicks();
         return remaining <= 0
                 ? "ready for the next hero in view within 5 blocks"
                 : "next after " + remaining + " more ticks with a hero in view";
@@ -1031,6 +1054,21 @@ public class LobotomizeStorage {
     /** Test seam: real loot tables are not available under MockBukkit. */
     void setHeroGiftLoot(@NotNull HeroGiftLoot heroGiftLoot) {
         this.heroGiftLoot = heroGiftLoot;
+    }
+
+    /** Test seam: MockBukkit does not implement ray tracing. */
+    void setThrowPathClear(@NotNull BiPredicate<Location, Location> throwPathClear) {
+        this.throwPathClear = throwPathClear;
+    }
+
+    /** Test seam: the villager's gift timer, or {@code null} if it has not seen a hero since it loaded. */
+    HeroGiftPolicy.@Nullable GiftClock heroGiftClock(@NotNull Villager villager) {
+        return this.heroGiftClocks.get(villager.getUniqueId());
+    }
+
+    /** Test seam: starts the villager's gift timer at a given point. */
+    void setHeroGiftClock(@NotNull Villager villager, HeroGiftPolicy.@NotNull GiftClock clock) {
+        this.heroGiftClocks.put(villager.getUniqueId(), clock);
     }
 
     /** Test seam: MockBukkit does not implement line of sight. */

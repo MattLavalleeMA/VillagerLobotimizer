@@ -104,17 +104,6 @@ class UninstallSweepTest extends MockBukkitTestBase {
     }
 
     @Test
-    void restoreAlsoRemovesTheHeroGiftCooldown() {
-        Villager villager = markedVillager();
-        NamespacedKey giftKey = new NamespacedKey(plugin, LobotomizeStorage.HERO_GIFT_COOLDOWN_KEY);
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 1234L);
-
-        runSweep(newSweep());
-
-        assertFalse(villager.getPersistentDataContainer().has(giftKey), "uninstall removes all of the plugin's villager data");
-    }
-
-    @Test
     void rowDrivenPhaseRestoresVillagerInItsRecordedChunk() throws SQLException {
         Villager villager = markedVillager();
         store.drainNow();

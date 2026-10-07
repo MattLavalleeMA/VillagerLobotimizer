@@ -7,7 +7,7 @@ import java.util.Random;
 
 /**
  * Pure rules for Hero of the Village gifts from lobotomized villagers, mirroring vanilla's gift
- * behavior, which a villager with its AI off can no longer run itself.
+ * behavior ({@code GiveGiftToHero}), which a villager with its AI off can no longer run itself.
  */
 public final class HeroGiftPolicy {
 
@@ -18,10 +18,18 @@ public final class HeroGiftPolicy {
     public static final int THROW_RANGE_SQUARED = 5 * 5;
     /** Vanilla's player sensor refreshes what a villager can see every 20 ticks. */
     public static final long SCAN_INTERVAL_TICKS = 20L;
-    /** Vanilla's delay before a villager's first gift. */
+    /** Vanilla waits this long after turning toward the hero before throwing, so the head can finish turning. */
+    public static final long HEAD_TURN_TICKS = 20L;
+    /** Vanilla's gift timer, which lives in the villager's brain and so restarts at this on every load. */
     public static final long FIRST_GIFT_DELAY_TICKS = 600L;
     public static final long MIN_COOLDOWN_TICKS = 600L;
     public static final long MAX_COOLDOWN_TICKS = 6600L;
+    /** Vanilla throws from this far below the villager's eyes... */
+    public static final double THROW_HEIGHT_BELOW_EYES = 0.3;
+    /** ...at this speed, in blocks per tick, toward the hero's feet. */
+    public static final double THROW_SPEED = 0.3;
+
+    private static final long NEVER = Long.MIN_VALUE;
 
     private static final Map<String, LootTables> PROFESSION_GIFTS = Map.ofEntries(
             Map.entry("armorer", LootTables.ARMORER_GIFT),
@@ -38,13 +46,36 @@ public final class HeroGiftPolicy {
             Map.entry("toolsmith", LootTables.TOOLSMITH_GIFT),
             Map.entry("weaponsmith", LootTables.WEAPONSMITH_GIFT));
 
-    public enum Timing {
-        /** No cooldown yet: start one at {@link #FIRST_GIFT_DELAY_TICKS}. */
-        SCHEDULE_FIRST,
+    /** What a villager does on a scan that sees a hero. */
+    public enum Step {
         /** Cooldown still running. */
         WAIT,
-        /** Cooldown elapsed: give a gift and start a new cooldown. */
+        /** Gift ready: turn toward the hero, as vanilla does before throwing. */
+        FACE,
+        /** Facing the hero, which is in range: give the gift, then {@link #startNextCooldown}. */
         GIVE
+    }
+
+    /**
+     * One villager's gift timer. Like vanilla's it is not saved: a villager starts at
+     * {@link #FIRST_GIFT_DELAY_TICKS} whenever it loads. Only touched on the villager's own thread.
+     */
+    public static final class GiftClock {
+        private long remainingTicks;
+        private long lastSeenTick = NEVER;
+        private long facingSinceTick = NEVER;
+
+        public GiftClock() {
+            this(FIRST_GIFT_DELAY_TICKS);
+        }
+
+        public GiftClock(long remainingTicks) {
+            this.remainingTicks = remainingTicks;
+        }
+
+        public long remainingTicks() {
+            return this.remainingTicks;
+        }
     }
 
     private HeroGiftPolicy() {
@@ -64,44 +95,41 @@ public final class HeroGiftPolicy {
     }
 
     /**
-     * Like vanilla, the cooldown only runs while a hero is in view: a villager a hero walks past
-     * again later still has to watch them for the rest of its cooldown before gifting.
-     *
-     * @param remainingTicks the stored cooldown after {@link #countDown}, or {@code null} if none
+     * Advances a villager's clock for a scan that sees a hero.
+     * <p>
+     * Vanilla's sensor remembers a seen hero for one scan, so each sighting runs the cooldown down by
+     * at most one scan interval: a hero seen on every other scan counts at half speed, and a failed
+     * check needs no record. Heroes scanning the same villager share its clock, so between them they
+     * never credit more than real time. Once the cooldown is done the villager faces the hero, and
+     * throws {@link #HEAD_TURN_TICKS} later if the hero is in range. Unlike vanilla, whose villager
+     * walks over and gives up after a few seconds, a trapped villager keeps the gift until a hero
+     * comes close.
      */
-    public static Timing timing(Long remainingTicks) {
-        if (remainingTicks == null) {
-            return Timing.SCHEDULE_FIRST;
+    public static Step onSighting(GiftClock clock, long now, boolean inThrowRange) {
+        long sinceLastSeen = clock.lastSeenTick == NEVER ? -1 : now - clock.lastSeenTick;
+        boolean continuous = sinceLastSeen >= 0 && sinceLastSeen <= SCAN_INTERVAL_TICKS;
+        clock.lastSeenTick = now;
+        if (clock.remainingTicks > 0) {
+            long credit = sinceLastSeen < 0 ? 0 : Math.min(sinceLastSeen, SCAN_INTERVAL_TICKS);
+            clock.remainingTicks = Math.max(0L, clock.remainingTicks - credit);
+            if (clock.remainingTicks > 0) {
+                return Step.WAIT;
+            }
+            clock.facingSinceTick = now;
+            return Step.FACE;
         }
-        return remainingTicks <= 0 ? Timing.GIVE : Timing.WAIT;
-    }
-
-    /**
-     * Counts the cooldown down for a sighting. Vanilla's sensor remembers a seen hero for one scan, so
-     * each sighting is worth at most one scan interval: a hero seen on every other scan runs the
-     * cooldown at half speed, and a failed check needs no record. Several heroes scanning the same
-     * villager share its last-seen tick, so between them they can never credit more than real time.
-     *
-     * @param lastSeenTick   the game tick of the previous sighting, or {@code null} if there was none
-     * @param maxCreditTicks the most one sighting may credit, i.e. the scan interval; also bounds a
-     *                       stale tick or one from another world's clock
-     */
-    public static long countDown(long remainingTicks, Long lastSeenTick, long now, long maxCreditTicks) {
-        long remaining = Math.min(remainingTicks, MAX_COOLDOWN_TICKS);
-        if (lastSeenTick == null) {
-            return remaining;
+        if (!continuous || clock.facingSinceTick == NEVER || now < clock.facingSinceTick) {
+            // The hero left view, so the villager has to turn toward them again.
+            clock.facingSinceTick = now;
+            return Step.FACE;
         }
-        long elapsed = Math.clamp(now - lastSeenTick, 0L, maxCreditTicks);
-        return Math.max(0L, remaining - elapsed);
-    }
-
-    public static long firstGiftCooldown() {
-        return FIRST_GIFT_DELAY_TICKS;
+        return inThrowRange && now - clock.facingSinceTick >= HEAD_TURN_TICKS ? Step.GIVE : Step.FACE;
     }
 
     /** Vanilla picks the next cooldown uniformly between 600 and 6600 ticks. */
-    public static long nextGiftCooldown(Random random) {
-        return MIN_COOLDOWN_TICKS + random.nextLong(MAX_COOLDOWN_TICKS - MIN_COOLDOWN_TICKS + 1);
+    public static void startNextCooldown(GiftClock clock, Random random) {
+        clock.remainingTicks = MIN_COOLDOWN_TICKS + random.nextLong(MAX_COOLDOWN_TICKS - MIN_COOLDOWN_TICKS + 1);
+        clock.facingSinceTick = NEVER;
     }
 
     /**

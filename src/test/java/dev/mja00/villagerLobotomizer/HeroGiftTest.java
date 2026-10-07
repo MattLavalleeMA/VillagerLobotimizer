@@ -14,6 +14,7 @@ import org.bukkit.loot.LootTables;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockbukkit.mockbukkit.MockBukkit;
@@ -21,6 +22,7 @@ import org.mockbukkit.mockbukkit.entity.PlayerMock;
 import org.mockbukkit.mockbukkit.world.WorldMock;
 
 import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy;
+import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.GiftClock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -35,20 +37,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class HeroGiftTest extends MockBukkitTestBase {
 
+    private static final long SCAN = HeroGiftPolicy.SCAN_INTERVAL_TICKS;
+
     private VillagerLobotomizer plugin;
     private WorldMock world;
-    private NamespacedKey giftKey;
     private Villager villager;
     private PlayerMock hero;
     private final List<LootTables> rolledTables = new ArrayList<>();
     private boolean heroVisible = true;
+    private boolean throwPathClear = true;
 
     @BeforeEach
     void setUp() {
         plugin = MockBukkit.load(VillagerLobotomizer.class);
         world = server.addSimpleWorld("test");
         world.loadChunk(0, 0);
-        giftKey = new NamespacedKey(plugin, LobotomizeStorage.HERO_GIFT_COOLDOWN_KEY);
 
         villager = world.spawn(new Location(world, 8, 64, 8), Villager.class);
         villager.setProfession(Villager.Profession.LIBRARIAN);
@@ -60,24 +63,39 @@ class HeroGiftTest extends MockBukkitTestBase {
         hero.addPotionEffect(new PotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE, 6000, 0));
         plugin.getHeroTracker().refresh(hero);
 
-        useStubLoot();
+        useStubs();
     }
 
-    private void useStubLoot() {
+    private void useStubs() {
         rolledTables.clear();
-        plugin.getStorage().setHeroGiftLoot((v, table, random) -> {
+        LobotomizeStorage storage = plugin.getStorage();
+        storage.setHeroGiftLoot((v, table, random) -> {
             rolledTables.add(table);
             return List.of(new ItemStack(Material.BOOK));
         });
-        plugin.getStorage().setHeroVisibility((v, player) -> heroVisible);
+        storage.setHeroVisibility((v, player) -> heroVisible);
+        storage.setThrowPathClear((from, to) -> throwPathClear);
     }
 
-    private void offer() {
+    private void offerAt(long tick) {
+        world.setGameTime(tick);
         plugin.getStorage().offerHeroGift(villager, hero);
     }
 
-    private Long storedTick() {
-        return villager.getPersistentDataContainer().get(giftKey, PersistentDataType.LONG);
+    private Long remaining() {
+        GiftClock clock = plugin.getStorage().heroGiftClock(villager);
+        return clock == null ? null : clock.remainingTicks();
+    }
+
+    private void startClockAt(long remainingTicks) {
+        plugin.getStorage().setHeroGiftClock(villager, new GiftClock(remainingTicks));
+    }
+
+    /** A ready villager turns to the hero on one scan and gives on the next. */
+    private void giveReadyGift() {
+        startClockAt(0L);
+        offerAt(1000L);
+        offerAt(1000L + SCAN);
     }
 
     private List<Item> droppedItems() {
@@ -85,45 +103,82 @@ class HeroGiftTest extends MockBukkitTestBase {
     }
 
     @Test
-    void firstSightSchedulesTheFirstGiftWithoutGiving() {
-        offer();
+    void firstSightStartsVanillasFirstGiftDelay() {
+        offerAt(1000L);
 
-        assertEquals(600L, storedTick());
+        assertEquals(600L, remaining());
         assertTrue(rolledTables.isEmpty());
-        assertTrue(droppedItems().isEmpty());
     }
 
     @Test
-    void dueGiftIsDroppedAtTheHerosFeetAndRescheduled() {
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+    void nothingIsSavedOnTheVillager() {
+        offerAt(1000L);
+        offerAt(1000L + SCAN);
 
-        offer();
+        assertTrue(villager.getPersistentDataContainer().getKeys().stream()
+                        .noneMatch(key -> key.getKey().toLowerCase().contains("gift")),
+                "like vanilla's, the timer restarts whenever the villager loads");
+    }
+
+    @Test
+    void readyVillagerTurnsToTheHeroBeforeThrowing() {
+        startClockAt(0L);
+        villager.setRotation(90f, 0f);
+
+        offerAt(1000L);
+
+        assertTrue(rolledTables.isEmpty(), "vanilla waits for the head to turn first");
+        assertEquals(-90f, villager.getLocation().getYaw(), 0.5f, "facing the hero, who is to the east");
+
+        offerAt(1000L + SCAN);
 
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
+    }
+
+    @Test
+    void giftIsThrownFromBelowTheVillagersEyesTowardTheHero() {
+        giveReadyGift();
+
         List<Item> items = droppedItems();
         assertEquals(1, items.size());
         Item gift = items.get(0);
         assertEquals(Material.BOOK, gift.getItemStack().getType());
-        assertTrue(gift.getLocation().distanceSquared(hero.getLocation()) < 1.0E-6, "dropped at the hero's feet");
-        assertEquals(0.0, gift.getVelocity().lengthSquared(), 1.0E-9, "no random pop away from the hero");
-        long next = storedTick();
+        Location expectedStart = villager.getEyeLocation().subtract(0.0, HeroGiftPolicy.THROW_HEIGHT_BELOW_EYES, 0.0);
+        assertTrue(gift.getLocation().distanceSquared(expectedStart) < 1.0E-6, "thrown from just below the eyes");
+        Vector velocity = gift.getVelocity();
+        assertEquals(HeroGiftPolicy.THROW_SPEED, velocity.length(), 1.0E-6);
+        assertTrue(velocity.getX() > 0.0, "toward the hero");
+        long next = remaining();
         assertTrue(next >= 600L && next <= 6600L, "rescheduled within vanilla's cooldown");
     }
 
     @Test
+    void blockedThrowIsDroppedAtTheHerosFeet() {
+        throwPathClear = false;
+
+        giveReadyGift();
+
+        List<Item> items = droppedItems();
+        assertEquals(1, items.size());
+        Item gift = items.get(0);
+        assertTrue(gift.getLocation().distanceSquared(hero.getLocation()) < 1.0E-6, "dropped at the hero's feet");
+        assertEquals(0.0, gift.getVelocity().lengthSquared(), 1.0E-9, "no random pop away from the hero");
+    }
+
+    @Test
     void cooldownRunsWhileTheHeroStaysInView() {
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 40L);
-        world.setGameTime(1000L);
-        offer();
-        assertEquals(40L, storedTick(), "the hero just came into view, so no time has accrued");
+        startClockAt(2 * SCAN);
+        offerAt(1000L);
+        assertEquals(2 * SCAN, remaining(), "the hero just came into view, so no time has accrued");
 
-        world.setGameTime(1020L);
-        offer();
-        assertEquals(20L, storedTick());
+        offerAt(1000L + SCAN);
+        assertEquals(SCAN, remaining());
 
-        world.setGameTime(1040L);
-        offer();
+        offerAt(1000L + 2 * SCAN);
+        assertEquals(0L, remaining());
+        assertTrue(rolledTables.isEmpty(), "turning to the hero first");
 
+        offerAt(1000L + 3 * SCAN);
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
     }
 
@@ -131,33 +186,29 @@ class HeroGiftTest extends MockBukkitTestBase {
     void returningHeroDoesNotGetAnInstantGift() {
         // Vanilla only counts the cooldown down while a hero is in view, so time away must not count:
         // only the one scan the last sighting is remembered for.
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 150L);
-        world.setGameTime(1000L);
-        offer();
+        startClockAt(150L);
+        offerAt(1000L);
 
         heroVisible = false;
-        world.setGameTime(1020L);
-        offer();
+        offerAt(1000L + SCAN);
 
         heroVisible = true;
-        world.setGameTime(50_000L);
-        offer();
+        offerAt(50_000L);
 
         assertTrue(rolledTables.isEmpty());
-        assertEquals(130L, storedTick());
+        assertEquals(150L - SCAN, remaining());
     }
 
     @Test
     void aHeroSeenEveryOtherScanCountsAtHalfSpeed() {
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 600L);
-        for (long tick = 1000L; tick <= 1160L; tick += HeroGiftPolicy.SCAN_INTERVAL_TICKS) {
-            heroVisible = (tick / HeroGiftPolicy.SCAN_INTERVAL_TICKS) % 2 == 0;
-            world.setGameTime(tick);
-            offer();
+        startClockAt(600L);
+        for (long tick = 1000L; tick <= 1160L; tick += SCAN) {
+            heroVisible = (tick / SCAN) % 2 == 0;
+            offerAt(tick);
         }
 
         // Seen at 1000, 1040, 1080, 1120, 1160: four credited sightings of one scan each.
-        assertEquals(600L - 4 * HeroGiftPolicy.SCAN_INTERVAL_TICKS, storedTick());
+        assertEquals(600L - 4 * SCAN, remaining());
     }
 
     @Test
@@ -166,33 +217,30 @@ class HeroGiftTest extends MockBukkitTestBase {
         hidden.teleport(new Location(world, 8, 64, 10));
         hidden.addPotionEffect(new PotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE, 6000, 0));
         plugin.getStorage().setHeroVisibility((v, player) -> player != hidden);
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 600L);
+        startClockAt(600L);
 
-        for (long tick = 1000L; tick <= 1100L; tick += HeroGiftPolicy.SCAN_INTERVAL_TICKS) {
-            world.setGameTime(tick);
-            offer();
+        for (long tick = 1000L; tick <= 1100L; tick += SCAN) {
+            offerAt(tick);
             world.setGameTime(tick + 10L);
             plugin.getStorage().offerHeroGift(villager, hidden);
         }
 
-        assertEquals(600L - 100L, storedTick(), "every scan of the visible hero counts in full");
+        assertEquals(600L - 100L, remaining(), "every scan of the visible hero counts in full");
     }
 
     @Test
     void aHeroBeyondGiftRangeStillRunsTheCooldownDown() {
         hero.teleport(new Location(world, 18, 64, 8));
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 20L);
-        world.setGameTime(1000L);
-        offer();
-        world.setGameTime(1020L);
-        offer();
+        startClockAt(SCAN);
+        offerAt(1000L);
+        offerAt(1000L + SCAN);
+        offerAt(1000L + 2 * SCAN);
 
-        assertEquals(0L, storedTick(), "a hero 10 blocks away is in view, like vanilla's 16-block sensor");
+        assertEquals(0L, remaining(), "a hero 10 blocks away is in view, like vanilla's 16-block sensor");
         assertTrue(rolledTables.isEmpty(), "but too far for the gift");
 
         hero.teleport(new Location(world, 11, 64, 8));
-        world.setGameTime(50_000L);
-        offer();
+        offerAt(1000L + 3 * SCAN);
 
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables, "the ready gift waits for the hero");
     }
@@ -200,9 +248,10 @@ class HeroGiftTest extends MockBukkitTestBase {
     @Test
     void awareVillagerIsLeftToVanilla() {
         villager.setAware(true);
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+        startClockAt(0L);
 
-        offer();
+        offerAt(1000L);
+        offerAt(1000L + SCAN);
 
         assertTrue(rolledTables.isEmpty());
     }
@@ -211,9 +260,8 @@ class HeroGiftTest extends MockBukkitTestBase {
     void noGiftWithoutTheHeroEffect() {
         hero.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
         plugin.getHeroTracker().refresh(hero);
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        offer();
+        giveReadyGift();
 
         assertTrue(rolledTables.isEmpty());
         assertTrue(droppedItems().isEmpty());
@@ -223,9 +271,8 @@ class HeroGiftTest extends MockBukkitTestBase {
     void staleTrackerEntryNeverGivesAGift() {
         // The tracker still lists the player, but the effect is gone: the live re-check must win.
         hero.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        offer();
+        giveReadyGift();
 
         assertTrue(rolledTables.isEmpty());
     }
@@ -233,17 +280,16 @@ class HeroGiftTest extends MockBukkitTestBase {
     @Test
     void noGiftToAHeroOutOfView() {
         hero.teleport(new Location(world, 25, 64, 8));
-        offer();
+        offerAt(1000L);
 
-        assertNull(storedTick(), "a hero 17 blocks away is never seen, so nothing is scheduled");
+        assertNull(remaining(), "a hero 17 blocks away is never seen, so no timer starts");
     }
 
     @Test
     void noGiftToAHeroTheVillagerCannotSee() {
         heroVisible = false;
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        offer();
+        giveReadyGift();
 
         assertTrue(rolledTables.isEmpty());
     }
@@ -251,9 +297,9 @@ class HeroGiftTest extends MockBukkitTestBase {
     @Test
     void noGiftToASpectator() {
         hero.setGameMode(GameMode.SPECTATOR);
-        offer();
+        offerAt(1000L);
 
-        assertNull(storedTick());
+        assertNull(remaining());
     }
 
     @Test
@@ -262,23 +308,33 @@ class HeroGiftTest extends MockBukkitTestBase {
         // reloadPluginState re-reads config.yml from disk.
         plugin.saveConfig();
         plugin.reloadPluginState();
-        useStubLoot();
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+        useStubs();
 
-        offer();
+        giveReadyGift();
 
         assertTrue(rolledTables.isEmpty());
         assertEquals("disabled in config", plugin.getStorage().describeHeroGift(villager));
     }
 
     @Test
-    void wakingTheVillagerDropsItsGiftCooldown() {
-        offer();
-        assertNotNull(storedTick());
+    void wakingTheVillagerDropsItsGiftTimer() {
+        offerAt(1000L);
+        assertNotNull(remaining());
 
         plugin.getStorage().clearLobotomizedMarker(villager);
 
-        assertFalse(villager.getPersistentDataContainer().has(giftKey, PersistentDataType.LONG));
+        assertNull(remaining());
+    }
+
+    @Test
+    void debugReportDescribesTheTimer() {
+        assertTrue(plugin.getStorage().describeHeroGift(villager).startsWith("no hero seen since it loaded"));
+
+        startClockAt(250L);
+        assertEquals("next after 250 more ticks with a hero in view", plugin.getStorage().describeHeroGift(villager));
+
+        startClockAt(0L);
+        assertEquals("ready for the next hero in view within 5 blocks", plugin.getStorage().describeHeroGift(villager));
     }
 
     @Test
@@ -292,12 +348,13 @@ class HeroGiftTest extends MockBukkitTestBase {
     }
 
     @Test
-    void heroScanGivesTrackedVillagersTheirGiftWithinOneScan() {
+    void heroScanGivesTrackedVillagersTheirGiftWithinTwoScans() {
         Villager tracked = spawnTrackedLobotomized(new Location(world, 8, 64, 10));
-        tracked.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+        plugin.getStorage().setHeroGiftClock(tracked, new GiftClock(0L));
 
-        // Well short of the villager's own 150-tick check, which MockBukkit could not evaluate.
-        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS + 1);
+        // Turn on the first scan, throw on the second: well short of the villager's own 150-tick
+        // check, which MockBukkit could not evaluate.
+        server.getScheduler().performTicks(2 * SCAN + 1);
 
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
         assertEquals(1, droppedItems().size());
@@ -305,11 +362,11 @@ class HeroGiftTest extends MockBukkitTestBase {
 
     @Test
     void heroScanIgnoresUntrackedVillagers() {
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
         plugin.getStorage().removeVillager(villager);
         villager.setAware(false);
+        startClockAt(0L);
 
-        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS + 1);
+        server.getScheduler().performTicks(2 * SCAN + 1);
 
         assertTrue(rolledTables.isEmpty());
     }
@@ -318,9 +375,9 @@ class HeroGiftTest extends MockBukkitTestBase {
     void heroScanStopsWhenTheEffectEnds() {
         Villager tracked = spawnTrackedLobotomized(new Location(world, 8, 64, 10));
         hero.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
-        tracked.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+        plugin.getStorage().setHeroGiftClock(tracked, new GiftClock(0L));
 
-        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS * 2 + 1);
+        server.getScheduler().performTicks(3 * SCAN + 1);
 
         assertTrue(rolledTables.isEmpty());
         assertFalse(plugin.getHeroTracker().candidates().contains(hero.getUniqueId()));

@@ -41,7 +41,7 @@ class LobotomizeCommandReplyTest extends MockBukkitTestBase {
                 .map(PlainTextComponentSerializer.plainText()::serialize)
                 .collect(Collectors.joining("\n"));
 
-        assertTrue(report.contains("Hero gift: no hero seen yet"), report);
+        assertTrue(report.contains("Hero gift: no hero seen since it loaded"), report);
     }
 
     @Test

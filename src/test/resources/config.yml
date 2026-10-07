@@ -68,7 +68,7 @@ unlobotomized-villager-trade-message: "<red>You cannot trade with unlobotomized 
 #Persist lobotomized state across chunk unloads and restarts.
 persist-lobotomized-state: true
 
-#Lobotomized villagers give Hero of the Village gifts at the hero's feet.
+#Lobotomized villagers give Hero of the Village gifts.
 hero-gifts-from-lobotomized-villagers: true
 
 #Sentry disabled for tests to avoid network init during MockBukkit.load().
