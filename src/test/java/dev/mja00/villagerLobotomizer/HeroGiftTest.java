@@ -52,7 +52,7 @@ class HeroGiftTest extends MockBukkitTestBase {
 
         villager = world.spawn(new Location(world, 8, 64, 8), Villager.class);
         villager.setProfession(Villager.Profession.LIBRARIAN);
-        // Lobotomized: an aware villager runs vanilla's own gift behaviour.
+        // Lobotomized: an aware villager runs vanilla's own gift behavior.
         villager.setAware(false);
 
         hero = server.addPlayer();

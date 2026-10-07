@@ -7,7 +7,7 @@ import java.util.Random;
 
 /**
  * Pure rules for Hero of the Village gifts from lobotomized villagers, mirroring vanilla's gift
- * behaviour, which a villager with its AI off can no longer run itself.
+ * behavior, which a villager with its AI off can no longer run itself.
  */
 public final class HeroGiftPolicy {
 

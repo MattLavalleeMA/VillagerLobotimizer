@@ -925,7 +925,7 @@ public class LobotomizeStorage {
 
     /**
      * Runs every {@link HeroGiftPolicy#SCAN_INTERVAL_TICKS} on a hero's thread, standing in for the
-     * gift behaviour of the tracked lobotomized villagers around them. Villagers outside this hero's
+     * gift behavior of the tracked lobotomized villagers around them. Villagers outside this hero's
      * region are skipped; on Folia any villager in view of the hero shares it.
      */
     public void giftNearbyVillagers(@NotNull Player hero) {
@@ -953,7 +953,7 @@ public class LobotomizeStorage {
             return;
         }
         try {
-            // An aware villager is running vanilla's gift behaviour itself.
+            // An aware villager is running vanilla's gift behavior itself.
             if (villager.isAware() || villager.isTrading() || villager.isSleeping()
                     || hero.getWorld() != villager.getWorld()) {
                 return;
