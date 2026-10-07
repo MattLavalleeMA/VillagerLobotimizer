@@ -11,6 +11,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -30,6 +31,7 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.BoundingBox;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Vehicle;
 import org.bukkit.entity.Villager;
@@ -81,6 +83,11 @@ public class LobotomizeStorage {
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
     private BiPredicate<Location, Location> throwPathClear = LobotomizeStorage::isThrowPathClear;
+    /**
+     * Records the villager as the gift's thrower, as vanilla does. Picking the item up then fires the
+     * {@code thrown_item_picked_up_by_player} advancement trigger with the villager as its entity.
+     */
+    private BiConsumer<Item, Villager> recordThrower = (item, villager) -> item.setThrower(villager.getUniqueId());
     /** Each tracked villager's gift timer. Like vanilla's it is not saved, so it restarts whenever the villager loads. */
     private final Map<UUID, HeroGiftPolicy.GiftClock> heroGiftClocks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
@@ -1012,10 +1019,16 @@ public class LobotomizeStorage {
             }
             if (thrown) {
                 Vector throwVelocity = velocity.clone();
-                villager.getWorld().dropItem(from, item, dropped -> dropped.setVelocity(throwVelocity));
+                villager.getWorld().dropItem(from, item, dropped -> {
+                    dropped.setVelocity(throwVelocity);
+                    this.recordThrower.accept(dropped, villager);
+                });
             } else {
                 // dropItem adds a random pop; zero it so the gift lands where the hero is standing.
-                hero.getWorld().dropItem(heroLocation, item, dropped -> dropped.setVelocity(new Vector()));
+                hero.getWorld().dropItem(heroLocation, item, dropped -> {
+                    dropped.setVelocity(new Vector());
+                    this.recordThrower.accept(dropped, villager);
+                });
             }
         }
         if (this.plugin.isDebugging()) {
@@ -1054,6 +1067,11 @@ public class LobotomizeStorage {
     /** Test seam: real loot tables are not available under MockBukkit. */
     void setHeroGiftLoot(@NotNull HeroGiftLoot heroGiftLoot) {
         this.heroGiftLoot = heroGiftLoot;
+    }
+
+    /** Test seam: MockBukkit does not implement {@code Item#setThrower}. */
+    void setRecordThrower(@NotNull BiConsumer<Item, Villager> recordThrower) {
+        this.recordThrower = recordThrower;
     }
 
     /** Test seam: MockBukkit does not implement ray tracing. */

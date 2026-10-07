@@ -55,7 +55,7 @@ Note `processVillager`'s active branch wakes on every check, not just on transit
 - `lastRestockGameTime` (LONG): `getGameTime()` at last restock counter reset; vanilla's 12000-tick fallback reset when day time is frozen
 
 ### Hero gifts
-Lobotomized villagers can't run vanilla's `GiveGiftToHero`, so the plugin does it for them. `HeroTracker` runs a 20-tick scan (vanilla's sensor rate) on each hero's own scheduler and calls `LobotomizeStorage.giftNearbyVillagers`; nothing runs while no hero is online. Each villager's `policy.HeroGiftPolicy.GiftClock` lives in memory only, like vanilla's brain timer: it starts at 600 ticks whenever the villager loads and is dropped on unload or wake. It counts down while a hero is in view within 16 blocks, at most one scan per sighting (vanilla's sensor memory), so a hero seen on every other scan counts at half speed. Once done, the villager turns to the hero (`setRotation`) and throws 20 ticks later when the hero is within 5 blocks, from 0.3 below its eyes at 0.3 blocks/tick like vanilla, or drops the gift at the hero's feet if a ray trace says the cell would block the throw. A ready gift waits for a hero to come in range, since a trapped villager cannot walk over
+Lobotomized villagers can't run vanilla's `GiveGiftToHero`, so the plugin does it for them. `HeroTracker` runs a 20-tick scan (vanilla's sensor rate) on each hero's own scheduler and calls `LobotomizeStorage.giftNearbyVillagers`; nothing runs while no hero is online. Each villager's `policy.HeroGiftPolicy.GiftClock` lives in memory only, like vanilla's brain timer: it starts at 600 ticks whenever the villager loads and is dropped on unload or wake. It counts down while a hero is in view within 16 blocks, at most one scan per sighting (vanilla's sensor memory), so a hero seen on every other scan counts at half speed. Once done, the villager turns to the hero (`setRotation`) and throws 20 ticks later when the hero is within 5 blocks, from 0.3 below its eyes at 0.3 blocks/tick like vanilla, or drops the gift at the hero's feet if a ray trace says the cell would block the throw. Either way the villager is set as the item's thrower, as in vanilla, so picking it up fires `thrown_item_picked_up_by_player` (what gift advancements in datapacks key off). A ready gift waits for a hero to come in range, since a trapped villager cannot walk over
 
 ## Development
 
@@ -74,6 +74,8 @@ failure, so a test that hits one looks green:
   `addVillager` with a pre-set marker to skip the geometry.
 - `WorldMock#getChunkAtAsync`, `WorldMock#getPlayersSeeingChunk` - hence `UninstallSweep.ChunkAccessor`.
 - `PaperScheduledTask#cancel` - swallow cancel failures, as `safeCancel` already does.
+- `Item#setThrower`, `World#rayTraceBlocks`, `LivingEntity#hasLineOfSight` - hence the hero gift seams on
+  `LobotomizeStorage` (`setRecordThrower`, `setThrowPathClear`, `setHeroVisibility`).
 
 Also: mock chunks are unloaded by default (`world.loadChunk(x, z)` first, or `processVillager` bails),
 and `ChunkMock#isEntitiesLoaded` just returns `isLoaded()`. Always check the run for `skipped=0`, not

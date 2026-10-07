@@ -1,7 +1,9 @@
 package dev.mja00.villagerLobotomizer;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -44,6 +46,7 @@ class HeroGiftTest extends MockBukkitTestBase {
     private Villager villager;
     private PlayerMock hero;
     private final List<LootTables> rolledTables = new ArrayList<>();
+    private final Map<Item, Villager> throwers = new HashMap<>();
     private boolean heroVisible = true;
     private boolean throwPathClear = true;
 
@@ -75,6 +78,8 @@ class HeroGiftTest extends MockBukkitTestBase {
         });
         storage.setHeroVisibility((v, player) -> heroVisible);
         storage.setThrowPathClear((from, to) -> throwPathClear);
+        throwers.clear();
+        storage.setRecordThrower(throwers::put);
     }
 
     private void offerAt(long tick) {
@@ -148,6 +153,7 @@ class HeroGiftTest extends MockBukkitTestBase {
         Vector velocity = gift.getVelocity();
         assertEquals(HeroGiftPolicy.THROW_SPEED, velocity.length(), 1.0E-6);
         assertTrue(velocity.getX() > 0.0, "toward the hero");
+        assertEquals(villager, throwers.get(gift), "the villager is the thrower, for gift advancements");
         long next = remaining();
         assertTrue(next >= 600L && next <= 6600L, "rescheduled within vanilla's cooldown");
     }
@@ -163,6 +169,7 @@ class HeroGiftTest extends MockBukkitTestBase {
         Item gift = items.get(0);
         assertTrue(gift.getLocation().distanceSquared(hero.getLocation()) < 1.0E-6, "dropped at the hero's feet");
         assertEquals(0.0, gift.getVelocity().lengthSquared(), 1.0E-9, "no random pop away from the hero");
+        assertEquals(villager, throwers.get(gift), "still credited to the villager, for gift advancements");
     }
 
     @Test
