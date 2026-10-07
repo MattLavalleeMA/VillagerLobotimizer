@@ -1,6 +1,7 @@
 package dev.mja00.villagerLobotomizer;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -10,12 +11,14 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiPredicate;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -25,19 +28,25 @@ import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Player;
 import org.bukkit.entity.Vehicle;
 import org.bukkit.entity.Villager;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.MerchantRecipe;
+import org.bukkit.loot.LootTables;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.IllegalPluginAccessException;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import dev.mja00.villagerLobotomizer.policy.BlockClassifier;
 import dev.mja00.villagerLobotomizer.policy.BlockGrid;
 import dev.mja00.villagerLobotomizer.policy.BlockSnapshot;
+import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy;
 import dev.mja00.villagerLobotomizer.policy.VillagerActivityPolicy;
 import dev.mja00.villagerLobotomizer.policy.VillagerState;
 import dev.mja00.villagerLobotomizer.storage.LobotomizedMarkerStore;
@@ -63,8 +72,16 @@ public class LobotomizeStorage {
 
     /** Shared so UninstallSweep can rebuild the key without depending on a live storage instance. */
     public static final String LOBOTOMIZED_KEY = "isLobotomized";
+    /** Ticks a lobotomized villager must still see a hero before its next gift. Shared with UninstallSweep. */
+    public static final String HERO_GIFT_COOLDOWN_KEY = "heroGiftCooldown";
 
     private final NamespacedKey lobotomizedKey;
+    private final NamespacedKey heroGiftCooldownKey;
+    private final boolean heroGiftsEnabled;
+    private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
+    private BiPredicate<Villager, Player> heroVisibility = Villager::hasLineOfSight;
+    /** Game tick of each villager's previous check that saw a hero; absent while none is in view. */
+    private final Map<UUID, Long> heroLastSeenTicks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
     private final NamespacedKey lastRestockCheckDayTimeKey;
     private final NamespacedKey lastRestockGameTimeKey;
@@ -120,6 +137,7 @@ public class LobotomizeStorage {
         this.silentLobotomizedVillagers = plugin.getConfig().getBoolean("silent-lobotomized-villagers");
         this.markerStore = plugin.getMarkerStore();
         this.persistConfigured = plugin.getConfig().getBoolean("persist-lobotomized-state", true);
+        this.heroGiftsEnabled = plugin.getConfig().getBoolean("hero-gifts-from-lobotomized-villagers", true);
         String soundName = plugin.getConfig().getString("restock-sound", "");
         String levelUpSoundName = plugin.getConfig().getString("level-up-sound", "");
 
@@ -193,6 +211,7 @@ public class LobotomizeStorage {
 
         this.key = new NamespacedKey(plugin, "lastRestock");
         this.lobotomizedKey = new NamespacedKey(plugin, LOBOTOMIZED_KEY);
+        this.heroGiftCooldownKey = new NamespacedKey(plugin, HERO_GIFT_COOLDOWN_KEY);
         this.lastRestockCheckDayTimeKey = new NamespacedKey(plugin, "lastRestockCheckDayTime");
         this.lastRestockGameTimeKey = new NamespacedKey(plugin, "lastRestockGameTime");
         // Use Paper's GlobalRegionScheduler for chunk processing. It never touches entities directly;
@@ -243,6 +262,7 @@ public class LobotomizeStorage {
      * @return {@code true} if the villager was being tracked, {@code false} otherwise
      */
     private boolean untrack(@NotNull Villager v) {
+        this.heroLastSeenTicks.remove(v.getUniqueId());
         synchronized (this.stateLock) {
             boolean wasActive = this.activeVillagers.remove(v);
             boolean wasInactive = this.inactiveVillagers.remove(v);
@@ -314,6 +334,7 @@ public class LobotomizeStorage {
     public final void removeVillager(@NotNull Villager villager) {
         boolean wasInactive;
         boolean wasActive;
+        this.heroLastSeenTicks.remove(villager.getUniqueId());
         // Cancel the per-villager task and drop set membership atomically (paired with
         // scheduleVillagerTask) so a concurrent (re)schedule can't leave a live orphan task.
         synchronized (this.stateLock) {
@@ -359,6 +380,10 @@ public class LobotomizeStorage {
             if (this.plugin.isDebugging()) {
                 this.logger.info("[Debug] Removed persistent lobotomized marker from " + villager.getUniqueId());
             }
+        }
+        // An awake villager gifts through vanilla AI again, so drop our cooldown along with the marker.
+        if (pdc.has(this.heroGiftCooldownKey, PersistentDataType.LONG)) {
+            pdc.remove(this.heroGiftCooldownKey);
         }
         // Outside the guard on purpose: a row can outlive its marker when a chunk never saved, and
         // clearing one we do not hold is free.
@@ -659,6 +684,8 @@ public class LobotomizeStorage {
         } else {
             // Inactive villagers still need their trades refreshed
             this.refreshTrades(villager);
+            // ...and, with their AI off, can no longer gift heroes on their own.
+            this.giveHeroGiftIfDue(villager);
 
             if (active) {
                 // Already running on entity thread, safe to modify villager
@@ -882,6 +909,122 @@ public class LobotomizeStorage {
         } catch (IllegalArgumentException e) {
             this.plugin.getLogger().warning("Failed to level up villager " + villager.getUniqueId() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Gives a lobotomized villager's Hero of the Village gift when one is due, dropping it at the hero's
+     * feet rather than throwing it, since a trapped villager's throw could land inside its own cell.
+     * Runs on the villager's thread; a failure is logged so it can never stop the villager's checks.
+     */
+    void giveHeroGiftIfDue(@NotNull Villager villager) {
+        if (!this.heroGiftsEnabled) {
+            return;
+        }
+        HeroTracker heroes = this.plugin.getHeroTracker();
+        if (heroes == null || heroes.isEmpty()) {
+            return;
+        }
+        try {
+            Player hero = villager.isTrading() || villager.isSleeping() ? null : nearestVisibleHero(villager, heroes);
+            if (hero == null) {
+                // Vanilla's cooldown only runs while a hero is in view, so pause it.
+                this.heroLastSeenTicks.remove(villager.getUniqueId());
+                return;
+            }
+            PersistentDataContainer pdc = villager.getPersistentDataContainer();
+            long now = villager.getWorld().getGameTime();
+            Long lastSeen = this.heroLastSeenTicks.put(villager.getUniqueId(), now);
+            Long stored = pdc.get(this.heroGiftCooldownKey, PersistentDataType.LONG);
+            Long remaining = stored == null
+                    ? null
+                    : HeroGiftPolicy.countDown(stored, lastSeen, now, this.inactiveCheckInterval);
+            switch (HeroGiftPolicy.timing(remaining)) {
+                case SCHEDULE_FIRST -> pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
+                case WAIT -> {
+                    if (!remaining.equals(stored)) {
+                        pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, remaining);
+                    }
+                }
+                case GIVE -> {
+                    long cooldown = HeroGiftPolicy.nextGiftCooldown(this.random);
+                    // Set before rolling, so a loot failure waits out a cooldown instead of retrying every check.
+                    pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, cooldown);
+                    dropHeroGift(villager, hero, cooldown);
+                }
+            }
+        } catch (RuntimeException e) {
+            this.logger.log(java.util.logging.Level.WARNING,
+                    "Could not give a hero gift from villager " + villager.getUniqueId(), e);
+        }
+    }
+
+    private void dropHeroGift(@NotNull Villager villager, @NotNull Player hero, long cooldownTicks) {
+        LootTables table = HeroGiftPolicy.giftTable(!villager.isAdult(), villager.getProfession().key().value());
+        Collection<ItemStack> items = this.heroGiftLoot.roll(villager, table, this.random);
+        Location feet = hero.getLocation();
+        for (ItemStack item : items) {
+            if (item == null || item.isEmpty()) {
+                continue;
+            }
+            // dropItem adds a random pop; zero it so the gift lands where the hero is standing.
+            hero.getWorld().dropItem(feet, item, dropped -> dropped.setVelocity(new Vector()));
+        }
+        if (this.plugin.isDebugging()) {
+            this.logger.info("[Debug] Villager " + villager.getUniqueId() + " gave a hero gift (" + table.name()
+                    + ", " + items.size() + " stack(s)) to " + hero.getName() + "; next after " + cooldownTicks
+                    + " ticks with a hero in view");
+        }
+    }
+
+    /**
+     * The closest tracked hero within gift range that the villager can see. Only players owned by this
+     * region are considered: on Folia anyone within 5 blocks is, and others must not be touched here.
+     */
+    private @Nullable Player nearestVisibleHero(@NotNull Villager villager, @NotNull HeroTracker heroes) {
+        Location villagerLocation = villager.getLocation();
+        Player nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        for (UUID id : heroes.candidates()) {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null || !Bukkit.isOwnedByCurrentRegion(player) || player.getWorld() != villager.getWorld()) {
+                continue;
+            }
+            double distance = player.getLocation().distanceSquared(villagerLocation);
+            if (distance >= nearestDistance
+                    || !HeroGiftPolicy.isCandidate(distance,
+                            player.hasPotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE),
+                            player.getGameMode() == GameMode.SPECTATOR)
+                    || !this.heroVisibility.test(villager, player)) {
+                continue;
+            }
+            nearest = player;
+            nearestDistance = distance;
+        }
+        return nearest;
+    }
+
+    /** For /lobotomy debug: the villager's hero-gift status. Entity-thread only. */
+    public @NotNull String describeHeroGift(@NotNull Villager villager) {
+        if (!this.heroGiftsEnabled) {
+            return "disabled in config";
+        }
+        Long remaining = villager.getPersistentDataContainer().get(this.heroGiftCooldownKey, PersistentDataType.LONG);
+        if (remaining == null) {
+            return "no hero seen yet";
+        }
+        return remaining <= 0
+                ? "ready for the next hero in view"
+                : "next after " + remaining + " more ticks with a hero in view";
+    }
+
+    /** Test seam: real loot tables are not available under MockBukkit. */
+    void setHeroGiftLoot(@NotNull HeroGiftLoot heroGiftLoot) {
+        this.heroGiftLoot = heroGiftLoot;
+    }
+
+    /** Test seam: MockBukkit does not implement line of sight. */
+    void setHeroVisibility(@NotNull BiPredicate<Villager, Player> heroVisibility) {
+        this.heroVisibility = heroVisibility;
     }
 
     /**

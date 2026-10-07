@@ -15,6 +15,7 @@ A Minecraft Paper plugin that improves server performance by turning off village
 - Maintains villager trading functionality while AI is disabled
 - Automatically refreshes villager trades on a configurable schedule with randomization support
 - Profession-specific restock sounds and level-up celebrations
+- Lobotomized villagers still give Hero of the Village gifts, dropped at the hero's feet
 - Optimized job site detection for better performance
 - Night-time trade refresh functionality
 - Allows naming villagers to control their behavior ("nobrain", "alwaysbrain")
@@ -36,7 +37,7 @@ A Minecraft Paper plugin that improves server performance by turning off village
 
 ```yaml
 #Configuration version - DO NOT MODIFY MANUALLY
-config-version: 6
+config-version: 7
 
 #List of names that will always keep villagers active (case-insensitive)
 always-active-names:
@@ -108,6 +109,9 @@ unlobotomized-villager-trade-message: "<red>You cannot trade with unlobotomized 
 #Persist lobotomized state across chunk unloads and server restarts. When enabled, lobotomized villagers stay lobotomized, so there is no lag spike while they are re-evaluated after a chunk load or a reboot.
 #Run '/lobotomy uninstall' before removing the plugin. Deleting the jar on its own leaves those villagers without AI, because nothing is left to restore them.
 persist-lobotomized-state: true
+
+#Let lobotomized villagers give Hero of the Village gifts, which their disabled AI otherwise prevents. Gifts follow vanilla's loot tables, 5-block range and 30s-5.5min cooldown (counted only while a hero is in view), and are dropped at the hero's feet so a villager trapped in its cell can still deliver them.
+hero-gifts-from-lobotomized-villagers: true
 
 # ===== SENTRY ERROR TRACKING =====
 # Sentry is an error monitoring service that helps developers identify and fix bugs proactively.

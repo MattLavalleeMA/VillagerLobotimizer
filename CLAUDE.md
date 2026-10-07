@@ -46,13 +46,14 @@ Note `processVillager`'s active branch wakes on every check, not just on transit
 **VillagerUtils.java** - Maps: `PROFESSION_TO_STATION`, `PROFESSION_TO_SOUND`. Methods: `isJobSiteNearby()` (3x3x3 box), `shouldRestock()` (PDC+day-time logic)
 
 ### Config (read in constructors)
-`check-interval`, `inactive-check-interval`, `restock-interval`, `restock-random-range`, `restock-sound`, `level-up-sound`, `debug`, `chunk-debug`, `create-debug-teams` (Folia-incompatible), `check-roof`, `ignore-non-solid-blocks`, `disable-chunk-villager-updates`, `persist-lobotomized-state` (also gates opening `state.db`; forced off for the session if it cannot be opened)
+`check-interval`, `inactive-check-interval`, `restock-interval`, `restock-random-range`, `restock-sound`, `level-up-sound`, `debug`, `chunk-debug`, `create-debug-teams` (Folia-incompatible), `check-roof`, `ignore-non-solid-blocks`, `disable-chunk-villager-updates`, `persist-lobotomized-state` (also gates opening `state.db`; forced off for the session if it cannot be opened), `hero-gifts-from-lobotomized-villagers`
 
 ### PDC Keys
 - `lastRestock` (LONG): Last trade refresh timestamp
 - `isLobotomized` (BYTE): Persistence marker (when `persist-lobotomized-state: true`). Survives restarts; mirrored by a row in `state.db`. Only ever written/cleared via `setLobotomizedMarker`/`clearLobotomizedMarker`, which keep the row in sync
 - `lastRestockCheckDayTime` (LONG): `getFullTime()` (absolute day time, freezes with `doDaylightCycle` off) at last restock check; used for day-rollover detection
 - `lastRestockGameTime` (LONG): `getGameTime()` at last restock counter reset; vanilla's 12000-tick fallback reset when day time is frozen
+- `heroGiftCooldown` (LONG): ticks a lobotomized villager must still see a hero before its next Hero of the Village gift. Like vanilla it only counts down while a hero is in view (`policy.HeroGiftPolicy`, driven from `processVillager`; the per-villager last-seen tick is in memory; `HeroTracker` short-circuits when no hero is online). Cleared with the marker and by uninstall
 
 ## Development
 

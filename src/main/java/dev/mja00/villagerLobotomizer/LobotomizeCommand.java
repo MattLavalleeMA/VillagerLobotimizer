@@ -190,6 +190,8 @@ public class LobotomizeCommand {
                 .append(Component.text(villager.getVillagerLevel()).color(NamedTextColor.GREEN));
         message = message.append(Component.text("\nVillager experience: "))
                 .append(Component.text(villager.getVillagerExperience()).color(NamedTextColor.GREEN));
+        message = message.append(Component.text("\nHero gift: "))
+                .append(Component.text(this.plugin.getStorage().describeHeroGift(villager)).color(NamedTextColor.GREEN));
         source.getSender().sendMessage(message);
 
         return Command.SINGLE_SUCCESS;
