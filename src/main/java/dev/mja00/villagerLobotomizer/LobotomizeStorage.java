@@ -79,7 +79,7 @@ public class LobotomizeStorage {
     private final NamespacedKey heroGiftCooldownKey;
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
-    private BiPredicate<Villager, Player> heroVisibility = Villager::hasLineOfSight;
+    private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
     /** Game tick of each villager's previous check that saw a hero; absent while none is in view. */
     private final Map<UUID, Long> heroLastSeenTicks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
@@ -935,26 +935,24 @@ public class LobotomizeStorage {
             long now = villager.getWorld().getGameTime();
             Long lastSeen = this.heroLastSeenTicks.put(villager.getUniqueId(), now);
             Long stored = pdc.get(this.heroGiftCooldownKey, PersistentDataType.LONG);
-            Long remaining = stored == null
-                    ? null
-                    : HeroGiftPolicy.countDown(stored, lastSeen, now, this.inactiveCheckInterval);
-            switch (HeroGiftPolicy.timing(remaining)) {
-                case SCHEDULE_FIRST -> pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
-                case WAIT -> {
-                    if (!remaining.equals(stored)) {
-                        pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, remaining);
-                    }
-                }
-                case GIVE -> {
-                    long cooldown = HeroGiftPolicy.nextGiftCooldown(this.random);
-                    // Set before rolling, so a loot failure waits out a cooldown instead of retrying every check.
-                    pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, cooldown);
-                    dropHeroGift(villager, hero, cooldown);
-                }
+            if (stored == null) {
+                pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
+                return;
             }
+            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, this.inactiveCheckInterval);
+            if (HeroGiftPolicy.timing(remaining) != HeroGiftPolicy.Timing.GIVE) {
+                if (remaining != stored) {
+                    pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, remaining);
+                }
+                return;
+            }
+            long cooldown = HeroGiftPolicy.nextGiftCooldown(this.random);
+            // Set before rolling, so a loot failure waits out a cooldown instead of retrying every check.
+            pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, cooldown);
+            dropHeroGift(villager, hero, cooldown);
         } catch (RuntimeException e) {
-            this.logger.log(java.util.logging.Level.WARNING,
-                    "Could not give a hero gift from villager " + villager.getUniqueId(), e);
+            this.logger.log(java.util.logging.Level.WARNING, e,
+                    () -> "Could not give a hero gift from villager " + villager.getUniqueId());
         }
     }
 
@@ -970,9 +968,10 @@ public class LobotomizeStorage {
             hero.getWorld().dropItem(feet, item, dropped -> dropped.setVelocity(new Vector()));
         }
         if (this.plugin.isDebugging()) {
-            this.logger.info("[Debug] Villager " + villager.getUniqueId() + " gave a hero gift (" + table.name()
-                    + ", " + items.size() + " stack(s)) to " + hero.getName() + "; next after " + cooldownTicks
-                    + " ticks with a hero in view");
+            this.logger.log(java.util.logging.Level.INFO,
+                    "[Debug] Villager {0} gave a hero gift ({1}, {2} stack(s)) to {3}; next after {4} ticks with a hero in view",
+                    new Object[]{villager.getUniqueId(), table.name(), String.valueOf(items.size()), hero.getName(),
+                            String.valueOf(cooldownTicks)});
         }
     }
 
