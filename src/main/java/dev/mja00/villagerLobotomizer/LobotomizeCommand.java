@@ -5,10 +5,13 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.command.BlockCommandSender;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Villager;
+import org.bukkit.plugin.IllegalPluginAccessException;
 import org.bukkit.util.RayTraceResult;
 import org.jetbrains.annotations.Nullable;
 
@@ -27,6 +30,7 @@ import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import io.papermc.paper.command.brigadier.argument.resolvers.selector.EntitySelectorArgumentResolver;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
@@ -169,11 +173,33 @@ public class LobotomizeCommand {
     }
 
     /**
-     * Sends detailed status information about a villager to the command source.
+     * Sends detailed status information about a villager to the command source. On Folia the villager
+     * and the sender can belong to different regions, so the report is built on the villager's thread
+     * and delivered on the sender's.
      *
-     * @return {@code Command.SINGLE_SUCCESS}
+     * @return {@code Command.SINGLE_SUCCESS}, or 0 if the villager is gone
      */
     private int getVillagerDetails(CommandSourceStack source, Villager villager) {
+        CommandSender sender = source.getSender();
+        ScheduledTask task;
+        try {
+            task = villager.getScheduler().run(this.plugin,
+                    SentryTaskWrapper.wrap(t -> reply(sender, buildVillagerDetails(villager))),
+                    () -> reply(sender, Component.text("That villager was removed before it could be inspected.")
+                            .color(NamedTextColor.RED)));
+        } catch (IllegalPluginAccessException e) {
+            return 0;
+        }
+        if (task == null) {
+            // Still on the command thread, which owns the sender.
+            sender.sendMessage(Component.text("That villager is no longer available.").color(NamedTextColor.RED));
+            return 0;
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** Builds the debug report. Must run on the villager's owning thread. */
+    Component buildVillagerDetails(Villager villager) {
         boolean lobotomized = this.plugin.getStorage().getLobotomized().contains(villager);
         boolean active = this.plugin.getStorage().getActive().contains(villager);
         // isAware false implies no AI regardless of hasAI
@@ -192,9 +218,30 @@ public class LobotomizeCommand {
                 .append(Component.text(villager.getVillagerExperience()).color(NamedTextColor.GREEN));
         message = message.append(Component.text("\nHero gift: "))
                 .append(Component.text(this.plugin.getStorage().describeHeroGift(villager)).color(NamedTextColor.GREEN));
-        source.getSender().sendMessage(message);
+        return message;
+    }
 
-        return Command.SINGLE_SUCCESS;
+    /**
+     * Sends a message on the thread that owns the sender. Player and entity senders (and command
+     * blocks) belong to a region on Folia; the console can be messaged from anywhere.
+     */
+    void reply(CommandSender sender, Component message) {
+        if (sender instanceof Entity entity) {
+            if (Bukkit.isOwnedByCurrentRegion(entity)) {
+                entity.sendMessage(message);
+            } else {
+                entity.getScheduler().run(this.plugin, SentryTaskWrapper.wrap(t -> entity.sendMessage(message)), null);
+            }
+        } else if (sender instanceof BlockCommandSender block) {
+            Location location = block.getBlock().getLocation();
+            if (Bukkit.isOwnedByCurrentRegion(location)) {
+                block.sendMessage(message);
+            } else {
+                Bukkit.getRegionScheduler().run(this.plugin, location, SentryTaskWrapper.wrap(t -> block.sendMessage(message)));
+            }
+        } else {
+            sender.sendMessage(message);
+        }
     }
 
     /**
