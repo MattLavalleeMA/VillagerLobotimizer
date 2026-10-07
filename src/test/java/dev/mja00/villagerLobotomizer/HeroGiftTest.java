@@ -111,7 +111,8 @@ class HeroGiftTest extends MockBukkitTestBase {
     void firstSightStartsVanillasFirstGiftDelay() {
         offerAt(1000L);
 
-        assertEquals(600L, remaining());
+        long first = remaining();
+        assertTrue(first >= 600L && first <= 600L + HeroGiftPolicy.FIRST_GIFT_JITTER_TICKS, "first delay " + first);
         assertTrue(rolledTables.isEmpty());
     }
 

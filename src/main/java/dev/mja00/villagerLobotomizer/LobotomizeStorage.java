@@ -968,7 +968,7 @@ public class LobotomizeStorage {
                 return;
             }
             HeroGiftPolicy.GiftClock clock = this.heroGiftClocks.computeIfAbsent(villager.getUniqueId(),
-                    id -> new HeroGiftPolicy.GiftClock());
+                    id -> new HeroGiftPolicy.GiftClock(HeroGiftPolicy.firstGiftDelay(this.random)));
             boolean inRange = HeroGiftPolicy.withinThrowingDistance(
                     heroLocation.getBlockX() - villagerLocation.getBlockX(),
                     heroLocation.getBlockY() - villagerLocation.getBlockY(),
@@ -1055,7 +1055,7 @@ public class LobotomizeStorage {
         }
         HeroGiftPolicy.GiftClock clock = this.heroGiftClocks.get(villager.getUniqueId());
         if (clock == null) {
-            return "no hero seen since it loaded; first after " + HeroGiftPolicy.FIRST_GIFT_DELAY_TICKS
+            return "no hero seen since it loaded; first after about " + HeroGiftPolicy.FIRST_GIFT_DELAY_TICKS
                     + " ticks with a hero in view";
         }
         long remaining = clock.remainingTicks();

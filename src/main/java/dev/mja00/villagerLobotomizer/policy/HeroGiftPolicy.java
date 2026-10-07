@@ -22,6 +22,12 @@ public final class HeroGiftPolicy {
     public static final long HEAD_TURN_TICKS = 20L;
     /** Vanilla's gift timer, which lives in the villager's brain and so restarts at this on every load. */
     public static final long FIRST_GIFT_DELAY_TICKS = 600L;
+    /**
+     * Up to this much is added to each villager's first delay. Vanilla villagers' sensors scan at
+     * their own offsets and walk over before throwing, so their first gifts naturally spread out;
+     * without this, every villager seen by the same scan would throw at once.
+     */
+    public static final long FIRST_GIFT_JITTER_TICKS = 3 * SCAN_INTERVAL_TICKS;
     public static final long MIN_COOLDOWN_TICKS = 600L;
     public static final long MAX_COOLDOWN_TICKS = 6600L;
     /** Vanilla throws from this far below the villager's eyes... */
@@ -124,6 +130,11 @@ public final class HeroGiftPolicy {
             return Step.FACE;
         }
         return inThrowRange && now - clock.facingSinceTick >= HEAD_TURN_TICKS ? Step.GIVE : Step.FACE;
+    }
+
+    /** The first gift delay for a villager that has not seen a hero since it loaded. */
+    public static long firstGiftDelay(Random random) {
+        return FIRST_GIFT_DELAY_TICKS + random.nextLong(FIRST_GIFT_JITTER_TICKS + 1);
     }
 
     /** Vanilla picks the next cooldown uniformly between 600 and 6600 ticks. */

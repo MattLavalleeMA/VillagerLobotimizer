@@ -5,7 +5,9 @@ import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.Step;
 import org.bukkit.loot.LootTables;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.Random;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,6 +36,18 @@ class HeroGiftPolicyTest {
     @Test
     void aNewClockStartsAtVanillasFirstGiftDelay() {
         assertEquals(600L, new GiftClock().remainingTicks());
+    }
+
+    @Test
+    void firstGiftsAreSpreadOverSeveralScans() {
+        Random random = new Random(7);
+        Set<Long> readyOnScan = new HashSet<>();
+        for (int i = 0; i < 1_000; i++) {
+            long delay = HeroGiftPolicy.firstGiftDelay(random);
+            assertTrue(delay >= 600L && delay <= 600L + HeroGiftPolicy.FIRST_GIFT_JITTER_TICKS, "delay " + delay);
+            readyOnScan.add((delay + SCAN - 1) / SCAN);
+        }
+        assertTrue(readyOnScan.size() > 1, "villagers seen together must not all throw on the same scan");
     }
 
     @Test
