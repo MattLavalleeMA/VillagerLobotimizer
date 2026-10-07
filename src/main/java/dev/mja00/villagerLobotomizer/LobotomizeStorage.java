@@ -82,7 +82,7 @@ public class LobotomizeStorage {
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
-    /** Game tick each villager last saw a hero; sightings too far apart are not counted as continuous. */
+    /** Game tick each villager last saw a hero; each sighting credits at most one scan interval. */
     private final Map<UUID, Long> heroLastSeenTicks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
     private final NamespacedKey lastRestockCheckDayTimeKey;
@@ -974,7 +974,7 @@ public class LobotomizeStorage {
                 pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
                 return;
             }
-            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, HeroGiftPolicy.MAX_SIGHTING_GAP_TICKS);
+            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, HeroGiftPolicy.SCAN_INTERVAL_TICKS);
             boolean inRange = HeroGiftPolicy.withinThrowingDistance(
                     heroLocation.getBlockX() - villagerLocation.getBlockX(),
                     heroLocation.getBlockY() - villagerLocation.getBlockY(),

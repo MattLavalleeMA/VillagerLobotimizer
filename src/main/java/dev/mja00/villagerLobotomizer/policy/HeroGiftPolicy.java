@@ -18,8 +18,6 @@ public final class HeroGiftPolicy {
     public static final int THROW_RANGE_SQUARED = 5 * 5;
     /** Vanilla's player sensor refreshes what a villager can see every 20 ticks. */
     public static final long SCAN_INTERVAL_TICKS = 20L;
-    /** The longest gap between two sightings still counted as continuous view: one missed scan. */
-    public static final long MAX_SIGHTING_GAP_TICKS = 2 * SCAN_INTERVAL_TICKS;
     /** Vanilla's delay before a villager's first gift. */
     public static final long FIRST_GIFT_DELAY_TICKS = 600L;
     public static final long MIN_COOLDOWN_TICKS = 600L;
@@ -79,21 +77,21 @@ public final class HeroGiftPolicy {
     }
 
     /**
-     * Counts the cooldown down by the time a hero has been in view since the previous sighting.
+     * Counts the cooldown down for a sighting. Vanilla's sensor remembers a seen hero for one scan, so
+     * each sighting is worth at most one scan interval: a hero seen on every other scan runs the
+     * cooldown at half speed, and a failed check needs no record. Several heroes scanning the same
+     * villager share its last-seen tick, so between them they can never credit more than real time.
      *
-     * @param lastSeenTick the game tick of the previous sighting, or {@code null} if there was none
-     * @param maxGapTicks  sightings further apart than this were not continuous (the hero left view in
-     *                     between, or the tick is from another world's clock), so they credit nothing
+     * @param lastSeenTick   the game tick of the previous sighting, or {@code null} if there was none
+     * @param maxCreditTicks the most one sighting may credit, i.e. the scan interval; also bounds a
+     *                       stale tick or one from another world's clock
      */
-    public static long countDown(long remainingTicks, Long lastSeenTick, long now, long maxGapTicks) {
+    public static long countDown(long remainingTicks, Long lastSeenTick, long now, long maxCreditTicks) {
         long remaining = Math.min(remainingTicks, MAX_COOLDOWN_TICKS);
         if (lastSeenTick == null) {
             return remaining;
         }
-        long elapsed = now - lastSeenTick;
-        if (elapsed <= 0 || elapsed > maxGapTicks) {
-            return remaining;
-        }
+        long elapsed = Math.clamp(now - lastSeenTick, 0L, maxCreditTicks);
         return Math.max(0L, remaining - elapsed);
     }
 

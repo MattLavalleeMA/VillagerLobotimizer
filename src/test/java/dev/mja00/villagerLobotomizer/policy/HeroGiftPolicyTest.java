@@ -38,29 +38,30 @@ class HeroGiftPolicyTest {
     }
 
     @Test
-    void countDownCreditsOnlyContinuousSightings() {
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, null, 5000L, 40L), "hero just came into view");
-        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4980L, 5000L, 40L));
-        assertEquals(260L, HeroGiftPolicy.countDown(300L, 4960L, 5000L, 40L), "one missed scan still counts");
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, 4900L, 5000L, 40L), "the hero left view in between");
+    void eachSightingCreditsAtMostOneScan() {
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, null, 5000L, 20L), "hero just came into view");
+        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4980L, 5000L, 20L));
+        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4960L, 5000L, 20L),
+                "a hidden scan in between is not credited");
+        assertEquals(290L, HeroGiftPolicy.countDown(300L, 4990L, 5000L, 20L), "a second hero's offset scan");
     }
 
     @Test
-    void countDownNeverCreditsAStaleOrForeignTick() {
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, 0L, 1_000_000L, 40L), "stale last-seen tick");
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, 9_000L, 1_000L, 40L),
+    void countDownBoundsAStaleOrForeignTick() {
+        assertEquals(280L, HeroGiftPolicy.countDown(300L, 0L, 1_000_000L, 20L), "stale last-seen tick");
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, 9_000L, 1_000L, 20L),
                 "a last-seen tick from another world's clock credits nothing");
     }
 
     @Test
     void countDownStopsAtZero() {
-        assertEquals(0L, HeroGiftPolicy.countDown(10L, 980L, 1000L, 40L));
-        assertEquals(0L, HeroGiftPolicy.countDown(0L, 980L, 1000L, 40L), "a ready gift stays ready");
+        assertEquals(0L, HeroGiftPolicy.countDown(10L, 980L, 1000L, 20L));
+        assertEquals(0L, HeroGiftPolicy.countDown(0L, 980L, 1000L, 20L), "a ready gift stays ready");
     }
 
     @Test
     void countDownCapsACorruptCooldown() {
-        assertEquals(HeroGiftPolicy.MAX_COOLDOWN_TICKS, HeroGiftPolicy.countDown(Long.MAX_VALUE, null, 0L, 40L));
+        assertEquals(HeroGiftPolicy.MAX_COOLDOWN_TICKS, HeroGiftPolicy.countDown(Long.MAX_VALUE, null, 0L, 20L));
     }
 
     @Test

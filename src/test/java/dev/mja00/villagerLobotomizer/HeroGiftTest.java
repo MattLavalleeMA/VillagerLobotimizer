@@ -129,7 +129,8 @@ class HeroGiftTest extends MockBukkitTestBase {
 
     @Test
     void returningHeroDoesNotGetAnInstantGift() {
-        // Vanilla only counts the cooldown down while a hero is in view, so time away must not count.
+        // Vanilla only counts the cooldown down while a hero is in view, so time away must not count:
+        // only the one scan the last sighting is remembered for.
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 150L);
         world.setGameTime(1000L);
         offer();
@@ -143,7 +144,38 @@ class HeroGiftTest extends MockBukkitTestBase {
         offer();
 
         assertTrue(rolledTables.isEmpty());
-        assertEquals(150L, storedTick());
+        assertEquals(130L, storedTick());
+    }
+
+    @Test
+    void aHeroSeenEveryOtherScanCountsAtHalfSpeed() {
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 600L);
+        for (long tick = 1000L; tick <= 1160L; tick += HeroGiftPolicy.SCAN_INTERVAL_TICKS) {
+            heroVisible = (tick / HeroGiftPolicy.SCAN_INTERVAL_TICKS) % 2 == 0;
+            world.setGameTime(tick);
+            offer();
+        }
+
+        // Seen at 1000, 1040, 1080, 1120, 1160: four credited sightings of one scan each.
+        assertEquals(600L - 4 * HeroGiftPolicy.SCAN_INTERVAL_TICKS, storedTick());
+    }
+
+    @Test
+    void aHiddenSecondHeroDoesNotDiscardTheVisibleOnesTime() {
+        PlayerMock hidden = server.addPlayer();
+        hidden.teleport(new Location(world, 8, 64, 10));
+        hidden.addPotionEffect(new PotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE, 6000, 0));
+        plugin.getStorage().setHeroVisibility((v, player) -> player != hidden);
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 600L);
+
+        for (long tick = 1000L; tick <= 1100L; tick += HeroGiftPolicy.SCAN_INTERVAL_TICKS) {
+            world.setGameTime(tick);
+            offer();
+            world.setGameTime(tick + 10L);
+            plugin.getStorage().offerHeroGift(villager, hidden);
+        }
+
+        assertEquals(600L - 100L, storedTick(), "every scan of the visible hero counts in full");
     }
 
     @Test
