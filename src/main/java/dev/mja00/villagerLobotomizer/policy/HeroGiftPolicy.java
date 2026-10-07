@@ -1,9 +1,12 @@
 package dev.mja00.villagerLobotomizer.policy;
 
 import org.bukkit.loot.LootTables;
+import org.bukkit.util.Vector;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 
 /**
  * Pure rules for Hero of the Village gifts from lobotomized villagers, mirroring vanilla's gift
@@ -34,6 +37,11 @@ public final class HeroGiftPolicy {
     public static final double THROW_HEIGHT_BELOW_EYES = 0.3;
     /** ...at this speed, in blocks per tick, toward the hero's feet. */
     public static final double THROW_SPEED = 0.3;
+    /** Vanilla item physics: gravity per tick, then drag on the motion. */
+    static final double ITEM_GRAVITY = 0.04;
+    static final double ITEM_DRAG = 0.98;
+    /** How long a thrown gift is followed before it counts as clear of the cell. */
+    static final int MAX_THROW_TICKS = 40;
 
     private static final long NEVER = Long.MIN_VALUE;
 
@@ -54,11 +62,11 @@ public final class HeroGiftPolicy {
 
     /** What a villager does on a scan that sees a hero. */
     public enum Step {
-        /** Cooldown still running. */
+        /** Nothing for this hero: the cooldown is still running, or the villager is facing a closer hero. */
         WAIT,
-        /** Gift ready: turn toward the hero, as vanilla does before throwing. */
+        /** Gift ready: turn toward this hero, as vanilla does before throwing. */
         FACE,
-        /** Facing the hero, which is in range: give the gift, then {@link #startNextCooldown}. */
+        /** Facing this hero, which is in range: give the gift, then {@link #startNextCooldown}. */
         GIVE
     }
 
@@ -69,6 +77,9 @@ public final class HeroGiftPolicy {
     public static final class GiftClock {
         private long remainingTicks;
         private long lastSeenTick = NEVER;
+        private @Nullable UUID recipient;
+        private long recipientSeenTick = NEVER;
+        private double recipientDistanceSquared;
         private long facingSinceTick = NEVER;
 
         public GiftClock() {
@@ -82,6 +93,16 @@ public final class HeroGiftPolicy {
         public long remainingTicks() {
             return this.remainingTicks;
         }
+    }
+
+    /** A block hit by a straight segment: where, and the outward normal of the face hit. */
+    public record Hit(Vector point, Vector normal) {
+    }
+
+    /** Finds the first block a straight segment hits, ignoring blocks with no collision. */
+    @FunctionalInterface
+    public interface SegmentCollider {
+        @Nullable Hit firstHit(Vector from, Vector to);
     }
 
     private HeroGiftPolicy() {
@@ -106,14 +127,18 @@ public final class HeroGiftPolicy {
      * Vanilla's sensor remembers a seen hero for one scan, so each sighting runs the cooldown down by
      * at most one scan interval: a hero seen on every other scan counts at half speed, and a failed
      * check needs no record. Heroes scanning the same villager share its clock, so between them they
-     * never credit more than real time. Once the cooldown is done the villager faces the hero, and
-     * throws {@link #HEAD_TURN_TICKS} later if the hero is in range. Unlike vanilla, whose villager
-     * walks over and gives up after a few seconds, a trapped villager keeps the gift until a hero
-     * comes close.
+     * never credit more than real time.
+     * <p>
+     * Once the cooldown is done the villager faces one hero, the closest it can see (vanilla targets
+     * its nearest visible player), and throws {@link #HEAD_TURN_TICKS} later if that hero is in range.
+     * Switching to another hero, or that hero leaving view, restarts the head turn. Unlike vanilla,
+     * whose villager walks over and gives up after a few seconds, a trapped villager keeps the gift
+     * until a hero comes close.
+     *
+     * @param distanceSquared the hero's squared distance from the villager
      */
-    public static Step onSighting(GiftClock clock, long now, boolean inThrowRange) {
+    public static Step onSighting(GiftClock clock, long now, UUID hero, double distanceSquared, boolean inThrowRange) {
         long sinceLastSeen = clock.lastSeenTick == NEVER ? -1 : now - clock.lastSeenTick;
-        boolean continuous = sinceLastSeen >= 0 && sinceLastSeen <= SCAN_INTERVAL_TICKS;
         clock.lastSeenTick = now;
         if (clock.remainingTicks > 0) {
             long credit = sinceLastSeen < 0 ? 0 : Math.min(sinceLastSeen, SCAN_INTERVAL_TICKS);
@@ -121,15 +146,56 @@ public final class HeroGiftPolicy {
             if (clock.remainingTicks > 0) {
                 return Step.WAIT;
             }
+        }
+        long sinceRecipientSeen = clock.recipient == null ? -1 : now - clock.recipientSeenTick;
+        boolean recipientInView = sinceRecipientSeen >= 0 && sinceRecipientSeen <= SCAN_INTERVAL_TICKS;
+        if (!hero.equals(clock.recipient)) {
+            if (recipientInView && distanceSquared >= clock.recipientDistanceSquared) {
+                return Step.WAIT;
+            }
+            clock.recipient = hero;
+            clock.recipientSeenTick = now;
+            clock.recipientDistanceSquared = distanceSquared;
             clock.facingSinceTick = now;
             return Step.FACE;
         }
-        if (!continuous || clock.facingSinceTick == NEVER || now < clock.facingSinceTick) {
+        clock.recipientSeenTick = now;
+        clock.recipientDistanceSquared = distanceSquared;
+        if (!recipientInView || now < clock.facingSinceTick) {
             // The hero left view, so the villager has to turn toward them again.
             clock.facingSinceTick = now;
             return Step.FACE;
         }
         return inThrowRange && now - clock.facingSinceTick >= HEAD_TURN_TICKS ? Step.GIVE : Step.FACE;
+    }
+
+    /**
+     * Whether a gift thrown from {@code start} escapes the villager's cell. Steps the item along
+     * vanilla's item physics, tracing each tick's segment, and accepts the throw only if the item's
+     * first contact is landing on a block top outside the villager's own block. Hitting a wall or
+     * ceiling, or landing back in the villager's block, means it would stay in the cell. An item
+     * still in the air after {@link #MAX_THROW_TICKS} has cleared everything nearby. The item is
+     * treated as a point at its bottom center, the part a low barrier catches first.
+     *
+     * @param villagerPosition the villager's feet, whose block is the one the gift must leave
+     */
+    public static boolean throwEscapes(Vector start, Vector velocity, Vector villagerPosition, SegmentCollider collider) {
+        Vector position = start.clone();
+        Vector motion = velocity.clone();
+        for (int tick = 0; tick < MAX_THROW_TICKS; tick++) {
+            motion.setY(motion.getY() - ITEM_GRAVITY);
+            Vector next = position.clone().add(motion);
+            Hit hit = collider.firstHit(position, next);
+            if (hit != null) {
+                boolean landed = hit.normal().getY() > 0.5;
+                boolean leftVillagerBlock = hit.point().getBlockX() != villagerPosition.getBlockX()
+                        || hit.point().getBlockZ() != villagerPosition.getBlockZ();
+                return landed && leftVillagerBlock;
+            }
+            position = next;
+            motion.multiply(ITEM_DRAG);
+        }
+        return true;
     }
 
     /** The first gift delay for a villager that has not seen a hero since it loaded. */
@@ -140,6 +206,8 @@ public final class HeroGiftPolicy {
     /** Vanilla picks the next cooldown uniformly between 600 and 6600 ticks. */
     public static void startNextCooldown(GiftClock clock, Random random) {
         clock.remainingTicks = MIN_COOLDOWN_TICKS + random.nextLong(MAX_COOLDOWN_TICKS - MIN_COOLDOWN_TICKS + 1);
+        clock.recipient = null;
+        clock.recipientSeenTick = NEVER;
         clock.facingSinceTick = NEVER;
     }
 

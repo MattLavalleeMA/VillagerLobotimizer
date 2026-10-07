@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -30,6 +31,7 @@ import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.BoundingBox;
+import org.bukkit.util.RayTraceResult;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
@@ -82,7 +84,7 @@ public class LobotomizeStorage {
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
-    private BiPredicate<Location, Location> throwPathClear = LobotomizeStorage::isThrowPathClear;
+    private Function<World, HeroGiftPolicy.SegmentCollider> throwCollider = LobotomizeStorage::blockCollider;
     /**
      * Records the villager as the gift's thrower, as vanilla does. Picking the item up then fires the
      * {@code thrown_item_picked_up_by_player} advancement trigger with the villager as its entity.
@@ -973,7 +975,8 @@ public class LobotomizeStorage {
                     heroLocation.getBlockX() - villagerLocation.getBlockX(),
                     heroLocation.getBlockY() - villagerLocation.getBlockY(),
                     heroLocation.getBlockZ() - villagerLocation.getBlockZ());
-            HeroGiftPolicy.Step step = HeroGiftPolicy.onSighting(clock, villager.getWorld().getGameTime(), inRange);
+            HeroGiftPolicy.Step step = HeroGiftPolicy.onSighting(clock, villager.getWorld().getGameTime(),
+                    hero.getUniqueId(), heroLocation.distanceSquared(villagerLocation), inRange);
             if (step == HeroGiftPolicy.Step.WAIT) {
                 return;
             }
@@ -1010,9 +1013,10 @@ public class LobotomizeStorage {
         Collection<ItemStack> items = this.heroGiftLoot.roll(villager, table, this.random);
         Location from = villager.getEyeLocation().subtract(0.0, HeroGiftPolicy.THROW_HEIGHT_BELOW_EYES, 0.0);
         Location heroLocation = hero.getLocation();
-        boolean thrown = this.throwPathClear.test(from, heroLocation.clone().add(0.0, 1.0, 0.0));
         Vector velocity = heroLocation.toVector().subtract(villager.getLocation().toVector());
         velocity = velocity.lengthSquared() < 1.0E-6 ? new Vector() : velocity.normalize().multiply(HeroGiftPolicy.THROW_SPEED);
+        boolean thrown = HeroGiftPolicy.throwEscapes(from.toVector(), velocity, villager.getLocation().toVector(),
+                this.throwCollider.apply(villager.getWorld()));
         for (ItemStack item : items) {
             if (item == null || item.isEmpty()) {
                 continue;
@@ -1039,13 +1043,21 @@ public class LobotomizeStorage {
         }
     }
 
-    private static boolean isThrowPathClear(@NotNull Location from, @NotNull Location to) {
-        Vector direction = to.toVector().subtract(from.toVector());
-        double distance = direction.length();
-        if (distance < 1.0E-6) {
-            return true;
-        }
-        return from.getWorld().rayTraceBlocks(from, direction, distance, FluidCollisionMode.NEVER, true) == null;
+    /** Traces a straight segment against the world's colliding blocks, as an item would collide. */
+    private static HeroGiftPolicy.SegmentCollider blockCollider(@NotNull World world) {
+        return (from, to) -> {
+            Vector direction = to.clone().subtract(from);
+            double distance = direction.length();
+            if (distance < 1.0E-9) {
+                return null;
+            }
+            RayTraceResult result = world.rayTraceBlocks(from.toLocation(world), direction, distance,
+                    FluidCollisionMode.NEVER, true);
+            if (result == null || result.getHitBlockFace() == null) {
+                return null;
+            }
+            return new HeroGiftPolicy.Hit(result.getHitPosition(), result.getHitBlockFace().getDirection());
+        };
     }
 
     /** For /lobotomy debug: the villager's hero-gift status. Entity-thread only. */
@@ -1075,8 +1087,8 @@ public class LobotomizeStorage {
     }
 
     /** Test seam: MockBukkit does not implement ray tracing. */
-    void setThrowPathClear(@NotNull BiPredicate<Location, Location> throwPathClear) {
-        this.throwPathClear = throwPathClear;
+    void setThrowCollider(@NotNull Function<World, HeroGiftPolicy.SegmentCollider> throwCollider) {
+        this.throwCollider = throwCollider;
     }
 
     /** Test seam: the villager's gift timer, or {@code null} if it has not seen a hero since it loaded. */
