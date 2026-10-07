@@ -110,7 +110,7 @@ unlobotomized-villager-trade-message: "<red>You cannot trade with unlobotomized 
 #Run '/lobotomy uninstall' before removing the plugin. Deleting the jar on its own leaves those villagers without AI, because nothing is left to restore them.
 persist-lobotomized-state: true
 
-#Let lobotomized villagers give Hero of the Village gifts, which their disabled AI otherwise prevents. Gifts follow vanilla's loot tables, 5-block range and 30s-5.5min cooldown (counted only while a hero is in view), and are dropped at the hero's feet so a villager trapped in its cell can still deliver them.
+#Let lobotomized villagers give Hero of the Village gifts, which their disabled AI otherwise prevents. Like vanilla, a villager's 30s-5.5min cooldown runs while it can see a hero within 16 blocks, and the gift (from vanilla's loot tables) is given once the hero is within 5 blocks. Gifts are dropped at the hero's feet so a villager trapped in its cell can still deliver them.
 hero-gifts-from-lobotomized-villagers: true
 
 # ===== SENTRY ERROR TRACKING =====

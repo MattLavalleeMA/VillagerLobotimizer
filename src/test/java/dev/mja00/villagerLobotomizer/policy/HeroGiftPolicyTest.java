@@ -13,11 +13,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class HeroGiftPolicyTest {
 
     @Test
-    void candidateNeedsEffectRangeAndNonSpectator() {
-        assertTrue(HeroGiftPolicy.isCandidate(4.9 * 4.9, true, false));
-        assertFalse(HeroGiftPolicy.isCandidate(5.0 * 5.0, true, false), "vanilla range is strictly under 5 blocks");
+    void candidateNeedsEffectViewRangeAndNonSpectator() {
+        assertTrue(HeroGiftPolicy.isCandidate(15.9 * 15.9, true, false), "vanilla villagers see 16 blocks");
+        assertFalse(HeroGiftPolicy.isCandidate(16.0 * 16.0, true, false));
         assertFalse(HeroGiftPolicy.isCandidate(1.0, false, false), "no hero effect");
         assertFalse(HeroGiftPolicy.isCandidate(1.0, true, true), "spectators are never gifted");
+    }
+
+    @Test
+    void throwingDistanceIsUnderFiveBlocks() {
+        assertTrue(HeroGiftPolicy.withinThrowingDistance(4, 0, 0));
+        assertTrue(HeroGiftPolicy.withinThrowingDistance(3, 1, 3));
+        assertFalse(HeroGiftPolicy.withinThrowingDistance(5, 0, 0), "vanilla range is strictly under 5 blocks");
+        assertFalse(HeroGiftPolicy.withinThrowingDistance(3, 0, 4));
     }
 
     @Test
@@ -30,21 +38,29 @@ class HeroGiftPolicyTest {
     }
 
     @Test
-    void countDownCreditsOnlyTimeWithAHeroInView() {
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, null, 5000L, 150L), "hero just came into view");
-        assertEquals(200L, HeroGiftPolicy.countDown(300L, 4900L, 5000L, 150L));
+    void countDownCreditsOnlyContinuousSightings() {
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, null, 5000L, 40L), "hero just came into view");
+        assertEquals(280L, HeroGiftPolicy.countDown(300L, 4980L, 5000L, 40L));
+        assertEquals(260L, HeroGiftPolicy.countDown(300L, 4960L, 5000L, 40L), "one missed scan still counts");
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, 4900L, 5000L, 40L), "the hero left view in between");
     }
 
     @Test
-    void countDownNeverCreditsMoreThanOneCheckInterval() {
-        assertEquals(150L, HeroGiftPolicy.countDown(300L, 0L, 1_000_000L, 150L), "stale last-seen tick");
-        assertEquals(300L, HeroGiftPolicy.countDown(300L, 9_000L, 1_000L, 150L),
+    void countDownNeverCreditsAStaleOrForeignTick() {
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, 0L, 1_000_000L, 40L), "stale last-seen tick");
+        assertEquals(300L, HeroGiftPolicy.countDown(300L, 9_000L, 1_000L, 40L),
                 "a last-seen tick from another world's clock credits nothing");
     }
 
     @Test
+    void countDownStopsAtZero() {
+        assertEquals(0L, HeroGiftPolicy.countDown(10L, 980L, 1000L, 40L));
+        assertEquals(0L, HeroGiftPolicy.countDown(0L, 980L, 1000L, 40L), "a ready gift stays ready");
+    }
+
+    @Test
     void countDownCapsACorruptCooldown() {
-        assertEquals(HeroGiftPolicy.MAX_COOLDOWN_TICKS, HeroGiftPolicy.countDown(Long.MAX_VALUE, null, 0L, 150L));
+        assertEquals(HeroGiftPolicy.MAX_COOLDOWN_TICKS, HeroGiftPolicy.countDown(Long.MAX_VALUE, null, 0L, 40L));
     }
 
     @Test

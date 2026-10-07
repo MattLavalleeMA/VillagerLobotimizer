@@ -82,7 +82,7 @@ public class LobotomizeStorage {
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
-    /** Game tick of each villager's previous check that saw a hero; absent while none is in view. */
+    /** Game tick each villager last saw a hero; sightings too far apart are not counted as continuous. */
     private final Map<UUID, Long> heroLastSeenTicks = new ConcurrentHashMap<>();
     private final LobotomizedMarkerStore markerStore;
     private final NamespacedKey lastRestockCheckDayTimeKey;
@@ -691,10 +691,9 @@ public class LobotomizeStorage {
                 villager.setGlowing(true);
             }
         } else {
-            // Inactive villagers still need their trades refreshed
+            // Inactive villagers still need their trades refreshed. Hero gifts, which their disabled AI
+            // can no longer give, are driven by HeroTracker's per-hero scan instead.
             this.refreshTrades(villager);
-            // ...and, with their AI off, can no longer gift heroes on their own.
-            this.giveHeroGiftIfDue(villager);
 
             if (active) {
                 // Already running on entity thread, safe to modify villager
@@ -925,23 +924,46 @@ public class LobotomizeStorage {
     }
 
     /**
-     * Gives a lobotomized villager's Hero of the Village gift when one is due, dropping it at the hero's
-     * feet rather than throwing it, since a trapped villager's throw could land inside its own cell.
-     * Runs on the villager's thread; a failure is logged so it can never stop the villager's checks.
+     * Runs every {@link HeroGiftPolicy#SCAN_INTERVAL_TICKS} on a hero's thread, standing in for the
+     * gift behaviour of the tracked lobotomized villagers around them. Villagers outside this hero's
+     * region are skipped; on Folia any villager in view of the hero shares it.
      */
-    void giveHeroGiftIfDue(@NotNull Villager villager) {
+    public void giftNearbyVillagers(@NotNull Player hero) {
+        if (!this.heroGiftsEnabled || this.shuttingDown || this.inactiveVillagers.isEmpty()) {
+            return;
+        }
+        for (Villager villager : hero.getWorld().getNearbyEntitiesByType(Villager.class, hero.getLocation(),
+                HeroGiftPolicy.VIEW_RANGE)) {
+            if (Bukkit.isOwnedByCurrentRegion(villager) && this.inactiveVillagers.contains(villager)) {
+                offerHeroGift(villager, hero);
+            }
+        }
+    }
+
+    /**
+     * Counts a lobotomized villager's gift cooldown down while it can see the hero, and gives the gift
+     * once the cooldown is done and the hero is in vanilla's 5-block range. A villager whose cooldown
+     * finishes while the hero is further away keeps the gift until a hero comes close, since it cannot
+     * walk over the way vanilla's would. The gift is dropped at the hero's feet rather than thrown, so a
+     * trapped villager's throw cannot land inside its own cell. Must run on the thread owning both;
+     * a failure is logged so it can never stop the scan.
+     */
+    void offerHeroGift(@NotNull Villager villager, @NotNull Player hero) {
         if (!this.heroGiftsEnabled) {
             return;
         }
-        HeroTracker heroes = this.plugin.getHeroTracker();
-        if (heroes == null || heroes.isEmpty()) {
-            return;
-        }
         try {
-            Player hero = villager.isTrading() || villager.isSleeping() ? null : nearestVisibleHero(villager, heroes);
-            if (hero == null) {
-                // Vanilla's cooldown only runs while a hero is in view, so pause it.
-                this.heroLastSeenTicks.remove(villager.getUniqueId());
+            // An aware villager is running vanilla's gift behaviour itself.
+            if (villager.isAware() || villager.isTrading() || villager.isSleeping()
+                    || hero.getWorld() != villager.getWorld()) {
+                return;
+            }
+            Location villagerLocation = villager.getLocation();
+            Location heroLocation = hero.getLocation();
+            if (!HeroGiftPolicy.isCandidate(heroLocation.distanceSquared(villagerLocation),
+                    hero.hasPotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE),
+                    hero.getGameMode() == GameMode.SPECTATOR)
+                    || !this.heroVisibility.test(villager, hero)) {
                 return;
             }
             PersistentDataContainer pdc = villager.getPersistentDataContainer();
@@ -952,15 +974,19 @@ public class LobotomizeStorage {
                 pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, HeroGiftPolicy.firstGiftCooldown());
                 return;
             }
-            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, this.inactiveCheckInterval);
-            if (HeroGiftPolicy.timing(remaining) != HeroGiftPolicy.Timing.GIVE) {
+            long remaining = HeroGiftPolicy.countDown(stored, lastSeen, now, HeroGiftPolicy.MAX_SIGHTING_GAP_TICKS);
+            boolean inRange = HeroGiftPolicy.withinThrowingDistance(
+                    heroLocation.getBlockX() - villagerLocation.getBlockX(),
+                    heroLocation.getBlockY() - villagerLocation.getBlockY(),
+                    heroLocation.getBlockZ() - villagerLocation.getBlockZ());
+            if (HeroGiftPolicy.timing(remaining) != HeroGiftPolicy.Timing.GIVE || !inRange) {
                 if (remaining != stored) {
                     pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, remaining);
                 }
                 return;
             }
             long cooldown = HeroGiftPolicy.nextGiftCooldown(this.random);
-            // Set before rolling, so a loot failure waits out a cooldown instead of retrying every check.
+            // Set before rolling, so a loot failure waits out a cooldown instead of retrying every scan.
             pdc.set(this.heroGiftCooldownKey, PersistentDataType.LONG, cooldown);
             dropHeroGift(villager, hero, cooldown);
         } catch (RuntimeException e) {
@@ -988,33 +1014,6 @@ public class LobotomizeStorage {
         }
     }
 
-    /**
-     * The closest tracked hero within gift range that the villager can see. Only players owned by this
-     * region are considered: on Folia anyone within 5 blocks is, and others must not be touched here.
-     */
-    private @Nullable Player nearestVisibleHero(@NotNull Villager villager, @NotNull HeroTracker heroes) {
-        Location villagerLocation = villager.getLocation();
-        Player nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
-        for (UUID id : heroes.candidates()) {
-            Player player = Bukkit.getPlayer(id);
-            if (player == null || !Bukkit.isOwnedByCurrentRegion(player) || player.getWorld() != villager.getWorld()) {
-                continue;
-            }
-            double distance = player.getLocation().distanceSquared(villagerLocation);
-            if (distance >= nearestDistance
-                    || !HeroGiftPolicy.isCandidate(distance,
-                            player.hasPotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE),
-                            player.getGameMode() == GameMode.SPECTATOR)
-                    || !this.heroVisibility.test(villager, player)) {
-                continue;
-            }
-            nearest = player;
-            nearestDistance = distance;
-        }
-        return nearest;
-    }
-
     /** For /lobotomy debug: the villager's hero-gift status. Entity-thread only. */
     public @NotNull String describeHeroGift(@NotNull Villager villager) {
         if (!this.heroGiftsEnabled) {
@@ -1025,7 +1024,7 @@ public class LobotomizeStorage {
             return "no hero seen yet";
         }
         return remaining <= 0
-                ? "ready for the next hero in view"
+                ? "ready for the next hero in view within 5 blocks"
                 : "next after " + remaining + " more ticks with a hero in view";
     }
 

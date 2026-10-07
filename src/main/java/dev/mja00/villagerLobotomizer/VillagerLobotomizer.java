@@ -89,7 +89,12 @@ public class VillagerLobotomizer extends JavaPlugin {
         boolean createDebuggingTeams = this.getConfig().getBoolean("create-debug-teams", false);
 
         // Outlives storage reloads, so heroes stay known when /lobotomy reload swaps storage.
-        this.heroTracker = new HeroTracker(this);
+        this.heroTracker = new HeroTracker(this, hero -> {
+            LobotomizeStorage current = this.storage;
+            if (current != null) {
+                current.giftNearbyVillagers(hero);
+            }
+        });
         this.getServer().getPluginManager().registerEvents(this.heroTracker, this);
         this.heroTracker.scanOnlinePlayers();
 

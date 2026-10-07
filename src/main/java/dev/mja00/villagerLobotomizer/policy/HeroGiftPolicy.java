@@ -11,8 +11,15 @@ import java.util.Random;
  */
 public final class HeroGiftPolicy {
 
-    /** Vanilla only gifts heroes closer than 5 blocks. */
-    public static final double RANGE_SQUARED = 5.0 * 5.0;
+    /** Vanilla villagers see players within their 16-block follow range, and count the cooldown down then. */
+    public static final double VIEW_RANGE = 16.0;
+    public static final double VIEW_RANGE_SQUARED = VIEW_RANGE * VIEW_RANGE;
+    /** Vanilla only hands a gift over once the villager's block is closer than 5 blocks to the hero's. */
+    public static final int THROW_RANGE_SQUARED = 5 * 5;
+    /** Vanilla's player sensor refreshes what a villager can see every 20 ticks. */
+    public static final long SCAN_INTERVAL_TICKS = 20L;
+    /** The longest gap between two sightings still counted as continuous view: one missed scan. */
+    public static final long MAX_SIGHTING_GAP_TICKS = 2 * SCAN_INTERVAL_TICKS;
     /** Vanilla's delay before a villager's first gift. */
     public static final long FIRST_GIFT_DELAY_TICKS = 600L;
     public static final long MIN_COOLDOWN_TICKS = 600L;
@@ -45,9 +52,17 @@ public final class HeroGiftPolicy {
     private HeroGiftPolicy() {
     }
 
-    /** Whether a player is a gift target, before the (costlier) line-of-sight check. */
+    /**
+     * Whether a hero counts as in view, before the (costlier) line-of-sight check. Like vanilla this is
+     * far wider than the gift range: every villager watching a hero runs its cooldown down.
+     */
     public static boolean isCandidate(double distanceSquared, boolean hasHeroEffect, boolean spectator) {
-        return hasHeroEffect && !spectator && distanceSquared < RANGE_SQUARED;
+        return hasHeroEffect && !spectator && distanceSquared < VIEW_RANGE_SQUARED;
+    }
+
+    /** Vanilla's gift range, measured between block positions. */
+    public static boolean withinThrowingDistance(int dx, int dy, int dz) {
+        return (long) dx * dx + (long) dy * dy + (long) dz * dz < THROW_RANGE_SQUARED;
     }
 
     /**
@@ -64,20 +79,22 @@ public final class HeroGiftPolicy {
     }
 
     /**
-     * Counts the cooldown down by the time a hero has been in view since the previous check.
+     * Counts the cooldown down by the time a hero has been in view since the previous sighting.
      *
-     * @param lastSeenTick the game tick of the previous check that saw a hero, or {@code null} if the
-     *                     hero was not in view then, in which case no time has accrued yet
-     * @param maxStepTicks the longest a single step may credit, i.e. the check interval, so a stale
-     *                     tick (or one from another world's clock) can never skip the cooldown
+     * @param lastSeenTick the game tick of the previous sighting, or {@code null} if there was none
+     * @param maxGapTicks  sightings further apart than this were not continuous (the hero left view in
+     *                     between, or the tick is from another world's clock), so they credit nothing
      */
-    public static long countDown(long remainingTicks, Long lastSeenTick, long now, long maxStepTicks) {
+    public static long countDown(long remainingTicks, Long lastSeenTick, long now, long maxGapTicks) {
         long remaining = Math.min(remainingTicks, MAX_COOLDOWN_TICKS);
         if (lastSeenTick == null) {
             return remaining;
         }
-        long elapsed = Math.clamp(now - lastSeenTick, 0L, maxStepTicks);
-        return remaining - elapsed;
+        long elapsed = now - lastSeenTick;
+        if (elapsed <= 0 || elapsed > maxGapTicks) {
+            return remaining;
+        }
+        return Math.max(0L, remaining - elapsed);
     }
 
     public static long firstGiftCooldown() {

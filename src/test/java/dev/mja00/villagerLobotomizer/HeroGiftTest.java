@@ -20,6 +20,8 @@ import org.mockbukkit.mockbukkit.MockBukkit;
 import org.mockbukkit.mockbukkit.entity.PlayerMock;
 import org.mockbukkit.mockbukkit.world.WorldMock;
 
+import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -27,8 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Drives {@link LobotomizeStorage#giveHeroGiftIfDue} directly: the periodic check that calls it
- * reaches the trapped-villager geometry, which MockBukkit cannot evaluate.
+ * Drives {@link LobotomizeStorage#offerHeroGift} directly for the rules, and the hero's scan for the
+ * wiring. The villager's own periodic check reaches the trapped-villager geometry, which MockBukkit
+ * cannot evaluate, so no test here runs long enough for it to fire.
  */
 class HeroGiftTest extends MockBukkitTestBase {
 
@@ -49,6 +52,8 @@ class HeroGiftTest extends MockBukkitTestBase {
 
         villager = world.spawn(new Location(world, 8, 64, 8), Villager.class);
         villager.setProfession(Villager.Profession.LIBRARIAN);
+        // Lobotomized: an aware villager runs vanilla's own gift behaviour.
+        villager.setAware(false);
 
         hero = server.addPlayer();
         hero.teleport(new Location(world, 10, 64, 8));
@@ -67,6 +72,10 @@ class HeroGiftTest extends MockBukkitTestBase {
         plugin.getStorage().setHeroVisibility((v, player) -> heroVisible);
     }
 
+    private void offer() {
+        plugin.getStorage().offerHeroGift(villager, hero);
+    }
+
     private Long storedTick() {
         return villager.getPersistentDataContainer().get(giftKey, PersistentDataType.LONG);
     }
@@ -77,7 +86,7 @@ class HeroGiftTest extends MockBukkitTestBase {
 
     @Test
     void firstSightSchedulesTheFirstGiftWithoutGiving() {
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertEquals(600L, storedTick());
         assertTrue(rolledTables.isEmpty());
@@ -88,7 +97,7 @@ class HeroGiftTest extends MockBukkitTestBase {
     void dueGiftIsDroppedAtTheHerosFeetAndRescheduled() {
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
         List<Item> items = droppedItems();
@@ -103,13 +112,17 @@ class HeroGiftTest extends MockBukkitTestBase {
 
     @Test
     void cooldownRunsWhileTheHeroStaysInView() {
-        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 150L);
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 40L);
         world.setGameTime(1000L);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
-        assertEquals(150L, storedTick(), "the hero just came into view, so no time has accrued");
+        offer();
+        assertEquals(40L, storedTick(), "the hero just came into view, so no time has accrued");
 
-        world.setGameTime(1150L);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        world.setGameTime(1020L);
+        offer();
+        assertEquals(20L, storedTick());
+
+        world.setGameTime(1040L);
+        offer();
 
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
     }
@@ -119,18 +132,47 @@ class HeroGiftTest extends MockBukkitTestBase {
         // Vanilla only counts the cooldown down while a hero is in view, so time away must not count.
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 150L);
         world.setGameTime(1000L);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         heroVisible = false;
-        world.setGameTime(1100L);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        world.setGameTime(1020L);
+        offer();
 
         heroVisible = true;
         world.setGameTime(50_000L);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertTrue(rolledTables.isEmpty());
         assertEquals(150L, storedTick());
+    }
+
+    @Test
+    void aHeroBeyondGiftRangeStillRunsTheCooldownDown() {
+        hero.teleport(new Location(world, 18, 64, 8));
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 20L);
+        world.setGameTime(1000L);
+        offer();
+        world.setGameTime(1020L);
+        offer();
+
+        assertEquals(0L, storedTick(), "a hero 10 blocks away is in view, like vanilla's 16-block sensor");
+        assertTrue(rolledTables.isEmpty(), "but too far for the gift");
+
+        hero.teleport(new Location(world, 11, 64, 8));
+        world.setGameTime(50_000L);
+        offer();
+
+        assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables, "the ready gift waits for the hero");
+    }
+
+    @Test
+    void awareVillagerIsLeftToVanilla() {
+        villager.setAware(true);
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+
+        offer();
+
+        assertTrue(rolledTables.isEmpty());
     }
 
     @Test
@@ -139,7 +181,7 @@ class HeroGiftTest extends MockBukkitTestBase {
         plugin.getHeroTracker().refresh(hero);
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertTrue(rolledTables.isEmpty());
         assertTrue(droppedItems().isEmpty());
@@ -151,17 +193,17 @@ class HeroGiftTest extends MockBukkitTestBase {
         hero.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertTrue(rolledTables.isEmpty());
     }
 
     @Test
-    void noGiftToAHeroOutOfRange() {
-        hero.teleport(new Location(world, 14, 64, 8));
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+    void noGiftToAHeroOutOfView() {
+        hero.teleport(new Location(world, 25, 64, 8));
+        offer();
 
-        assertNull(storedTick(), "a hero 6 blocks away is never seen, so nothing is scheduled");
+        assertNull(storedTick(), "a hero 17 blocks away is never seen, so nothing is scheduled");
     }
 
     @Test
@@ -169,7 +211,7 @@ class HeroGiftTest extends MockBukkitTestBase {
         heroVisible = false;
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertTrue(rolledTables.isEmpty());
     }
@@ -177,7 +219,7 @@ class HeroGiftTest extends MockBukkitTestBase {
     @Test
     void noGiftToASpectator() {
         hero.setGameMode(GameMode.SPECTATOR);
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertNull(storedTick());
     }
@@ -191,7 +233,7 @@ class HeroGiftTest extends MockBukkitTestBase {
         useStubLoot();
         villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
 
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
 
         assertTrue(rolledTables.isEmpty());
         assertEquals("disabled in config", plugin.getStorage().describeHeroGift(villager));
@@ -199,7 +241,7 @@ class HeroGiftTest extends MockBukkitTestBase {
 
     @Test
     void wakingTheVillagerDropsItsGiftCooldown() {
-        plugin.getStorage().giveHeroGiftIfDue(villager);
+        offer();
         assertNotNull(storedTick());
 
         plugin.getStorage().clearLobotomizedMarker(villager);
@@ -215,5 +257,55 @@ class HeroGiftTest extends MockBukkitTestBase {
 
         other.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
         assertFalse(plugin.getHeroTracker().candidates().contains(other.getUniqueId()), "removed on effect loss");
+    }
+
+    @Test
+    void heroScanGivesTrackedVillagersTheirGiftWithinOneScan() {
+        Villager tracked = spawnTrackedLobotomized(new Location(world, 8, 64, 10));
+        tracked.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+
+        // Well short of the villager's own 150-tick check, which MockBukkit could not evaluate.
+        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS + 1);
+
+        assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
+        assertEquals(1, droppedItems().size());
+    }
+
+    @Test
+    void heroScanIgnoresUntrackedVillagers() {
+        villager.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+        plugin.getStorage().removeVillager(villager);
+        villager.setAware(false);
+
+        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS + 1);
+
+        assertTrue(rolledTables.isEmpty());
+    }
+
+    @Test
+    void heroScanStopsWhenTheEffectEnds() {
+        Villager tracked = spawnTrackedLobotomized(new Location(world, 8, 64, 10));
+        hero.removePotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE);
+        tracked.getPersistentDataContainer().set(giftKey, PersistentDataType.LONG, 0L);
+
+        server.getScheduler().performTicks(HeroGiftPolicy.SCAN_INTERVAL_TICKS * 2 + 1);
+
+        assertTrue(rolledTables.isEmpty());
+        assertFalse(plugin.getHeroTracker().candidates().contains(hero.getUniqueId()));
+    }
+
+    /** Tracked lobotomized via the persisted marker, so no trapped-villager geometry is evaluated. */
+    private Villager spawnTrackedLobotomized(Location location) {
+        NamespacedKey markerKey = new NamespacedKey(plugin, LobotomizeStorage.LOBOTOMIZED_KEY);
+        Villager tracked = world.spawn(location, Villager.class, v -> {
+            v.setProfession(Villager.Profession.LIBRARIAN);
+            v.getPersistentDataContainer().set(markerKey, PersistentDataType.BYTE, (byte) 1);
+        });
+        if (!plugin.getStorage().getLobotomized().contains(tracked)) {
+            plugin.getStorage().addVillager(tracked);
+        }
+        assertTrue(plugin.getStorage().getLobotomized().contains(tracked), "precondition: tracked lobotomized");
+        assertFalse(tracked.isAware(), "precondition: AI off");
+        return tracked;
     }
 }
