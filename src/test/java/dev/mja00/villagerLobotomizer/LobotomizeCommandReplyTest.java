@@ -10,6 +10,8 @@ import org.mockbukkit.mockbukkit.MockBukkit;
 import org.mockbukkit.mockbukkit.entity.PlayerMock;
 import org.mockbukkit.mockbukkit.world.WorldMock;
 
+import java.util.stream.Collectors;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,10 +33,13 @@ class LobotomizeCommandReplyTest extends MockBukkitTestBase {
 
     @Test
     void reportIncludesHeroGiftStatus() {
+        // "Nobrain" decides the policy before any block is read; BlockMock#isPassable is unimplemented.
         Villager villager = world.spawn(new Location(world, 8, 64, 8), Villager.class);
+        villager.customName(Component.text("Nobrain"));
 
-        String report = PlainTextComponentSerializer.plainText()
-                .serialize(new LobotomizeCommand(plugin).buildVillagerDetails(villager));
+        String report = new LobotomizeCommand(plugin).buildVillagerDetails(villager).stream()
+                .map(PlainTextComponentSerializer.plainText()::serialize)
+                .collect(Collectors.joining("\n"));
 
         assertTrue(report.contains("Hero gift: no hero seen yet"), report);
     }
