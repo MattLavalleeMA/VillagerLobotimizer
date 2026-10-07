@@ -92,6 +92,22 @@ public class LobotomizeStorage {
     private BiConsumer<Item, Villager> recordThrower = (item, villager) -> item.setThrower(villager.getUniqueId());
     /** Each tracked villager's gift timer. Like vanilla's it is not saved, so it restarts whenever the villager loads. */
     private final Map<UUID, HeroGiftPolicy.GiftClock> heroGiftClocks = new ConcurrentHashMap<>();
+    /** Villagers turned toward a hero, with the rotation to restore. Only touched on the villager's thread. */
+    private final Map<UUID, TurnedHead> turnedHeads = new ConcurrentHashMap<>();
+    /** Longer than a scan, so a villager still watching a hero is not turned back between scans. */
+    static final long HEAD_TURN_BACK_TICKS = HeroGiftPolicy.SCAN_INTERVAL_TICKS + 10L;
+
+    private static final class TurnedHead {
+        final float yaw;
+        final float pitch;
+        long lastFacedTick;
+        boolean turnBackScheduled;
+
+        TurnedHead(float yaw, float pitch) {
+            this.yaw = yaw;
+            this.pitch = pitch;
+        }
+    }
     private final LobotomizedMarkerStore markerStore;
     private final NamespacedKey lastRestockCheckDayTimeKey;
     private final NamespacedKey lastRestockGameTimeKey;
@@ -275,6 +291,7 @@ public class LobotomizeStorage {
      */
     private boolean untrack(@NotNull Villager v) {
         this.heroGiftClocks.remove(v.getUniqueId());
+        this.turnedHeads.remove(v.getUniqueId());
         synchronized (this.stateLock) {
             boolean wasActive = this.activeVillagers.remove(v);
             boolean wasInactive = this.inactiveVillagers.remove(v);
@@ -347,6 +364,11 @@ public class LobotomizeStorage {
         boolean wasInactive;
         boolean wasActive;
         this.heroGiftClocks.remove(villager.getUniqueId());
+        // Don't let a villager unloading mid-turn be saved facing the hero.
+        TurnedHead head = this.turnedHeads.remove(villager.getUniqueId());
+        if (head != null && Bukkit.isOwnedByCurrentRegion(villager)) {
+            villager.setRotation(head.yaw, head.pitch);
+        }
         // Cancel the per-villager task and drop set membership atomically (paired with
         // scheduleVillagerTask) so a concurrent (re)schedule can't leave a live orphan task.
         synchronized (this.stateLock) {
@@ -393,8 +415,10 @@ public class LobotomizeStorage {
                 this.logger.info("[Debug] Removed persistent lobotomized marker from " + villager.getUniqueId());
             }
         }
-        // An awake villager gifts through vanilla AI again, so drop our timer along with the marker.
+        // An awake villager gifts through vanilla AI again, so drop our timer along with the marker;
+        // its own look control takes its head back over.
         this.heroGiftClocks.remove(villager.getUniqueId());
+        this.turnedHeads.remove(villager.getUniqueId());
         // Outside the guard on purpose: a row can outlive its marker when a chunk never saved, and
         // clearing one we do not hold is free.
         if (this.markerStore != null) {
@@ -980,7 +1004,7 @@ public class LobotomizeStorage {
             if (step == HeroGiftPolicy.Step.WAIT) {
                 return;
             }
-            faceHero(villager, hero);
+            faceHero(villager, hero, villager.getWorld().getGameTime());
             if (step != HeroGiftPolicy.Step.GIVE) {
                 return;
             }
@@ -993,15 +1017,56 @@ public class LobotomizeStorage {
         }
     }
 
-    /** Turns the villager's head toward the hero. Its AI is off, so nothing turns it back. */
-    private static void faceHero(@NotNull Villager villager, @NotNull Player hero) {
+    /**
+     * Turns the villager's head toward the hero, remembering where it looked before the first turn.
+     * Its AI is off, so nothing else would ever turn it back; {@link #turnBackWhenIdle} does.
+     */
+    private void faceHero(@NotNull Villager villager, @NotNull Player hero, long now) {
         Location eyes = villager.getEyeLocation();
         Vector toHero = hero.getEyeLocation().toVector().subtract(eyes.toVector());
         if (toHero.lengthSquared() < 1.0E-6) {
             return;
         }
+        Location current = villager.getLocation();
+        TurnedHead head = this.turnedHeads.computeIfAbsent(villager.getUniqueId(),
+                id -> new TurnedHead(current.getYaw(), current.getPitch()));
+        head.lastFacedTick = now;
         eyes.setDirection(toHero);
         villager.setRotation(eyes.getYaw(), eyes.getPitch());
+        if (!head.turnBackScheduled) {
+            head.turnBackScheduled = scheduleTurnBack(villager, HEAD_TURN_BACK_TICKS);
+        }
+    }
+
+    private boolean scheduleTurnBack(@NotNull Villager villager, long delayTicks) {
+        try {
+            return villager.getScheduler().runDelayed(this.plugin,
+                    SentryTaskWrapper.wrap(task -> turnBackWhenIdle(villager)), null, delayTicks) != null;
+        } catch (IllegalPluginAccessException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Restores the villager's original rotation once it has not faced a hero for
+     * {@link #HEAD_TURN_BACK_TICKS}: after its throw, or when the hero walked off. Vanilla's look
+     * control does the same once the gift behavior stops.
+     */
+    private void turnBackWhenIdle(@NotNull Villager villager) {
+        TurnedHead head = this.turnedHeads.get(villager.getUniqueId());
+        if (head == null) {
+            return;
+        }
+        long idle = villager.getWorld().getGameTime() - head.lastFacedTick;
+        if (idle >= 0 && idle < HEAD_TURN_BACK_TICKS) {
+            head.turnBackScheduled = scheduleTurnBack(villager, HEAD_TURN_BACK_TICKS - idle);
+            return;
+        }
+        this.turnedHeads.remove(villager.getUniqueId());
+        // An awake villager's own AI has taken its head over again.
+        if (!villager.isAware()) {
+            villager.setRotation(head.yaw, head.pitch);
+        }
     }
 
     /**

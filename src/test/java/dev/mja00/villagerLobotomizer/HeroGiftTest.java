@@ -144,6 +144,36 @@ class HeroGiftTest extends MockBukkitTestBase {
     }
 
     @Test
+    void headTurnsBackAfterTheThrow() {
+        villager.setRotation(90f, 0f);
+
+        giveReadyGift();
+        assertEquals(-90f, villager.getLocation().getYaw(), 0.5f, "faced the hero to throw");
+
+        server.getScheduler().performTicks(2 * LobotomizeStorage.HEAD_TURN_BACK_TICKS + 1);
+
+        assertEquals(90f, villager.getLocation().getYaw(), 0.5f, "back to where it was looking before");
+    }
+
+    @Test
+    void headStaysOnAHeroItIsStillWatching() {
+        hero.teleport(new Location(world, 18, 64, 8));
+        villager.setRotation(90f, 0f);
+        startClockAt(0L);
+        offerAt(1000L);
+
+        server.getScheduler().performTicks(SCAN);
+        plugin.getStorage().offerHeroGift(villager, hero);
+        server.getScheduler().performTicks(SCAN);
+
+        assertEquals(-90f, villager.getLocation().getYaw(), 0.5f, "faced the hero again within the turn-back delay");
+
+        server.getScheduler().performTicks(2 * LobotomizeStorage.HEAD_TURN_BACK_TICKS);
+
+        assertEquals(90f, villager.getLocation().getYaw(), 0.5f, "turned back once the hero was no longer faced");
+    }
+
+    @Test
     void giftIsThrownFromBelowTheVillagersEyesTowardTheHero() {
         giveReadyGift();
 
