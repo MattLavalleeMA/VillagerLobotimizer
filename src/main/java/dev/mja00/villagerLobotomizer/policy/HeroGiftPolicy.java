@@ -1,12 +1,14 @@
 package dev.mja00.villagerLobotomizer.policy;
 
 import org.bukkit.loot.LootTables;
+import org.bukkit.util.BoundingBox;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Pure rules for Hero of the Village gifts from lobotomized villagers, mirroring vanilla's gift
@@ -42,6 +44,11 @@ public final class HeroGiftPolicy {
     static final double ITEM_DRAG = 0.98;
     /** How long a thrown gift is followed before it counts as clear of the cell. */
     static final int MAX_THROW_TICKS = 40;
+    /** An item entity's collision box: 0.25 wide and 0.25 tall. */
+    static final double ITEM_HALF_WIDTH = 0.125;
+    static final double ITEM_HEIGHT = 0.25;
+    /** Half the item's width, so consecutive boxes overlap and nothing thin slips between them. */
+    static final double MAX_THROW_SUBSTEP = ITEM_HALF_WIDTH;
 
     private static final long NEVER = Long.MIN_VALUE;
 
@@ -93,16 +100,6 @@ public final class HeroGiftPolicy {
         public long remainingTicks() {
             return this.remainingTicks;
         }
-    }
-
-    /** A block hit by a straight segment: where, and the outward normal of the face hit. */
-    public record Hit(Vector point, Vector normal) {
-    }
-
-    /** Finds the first block a straight segment hits, ignoring blocks with no collision. */
-    @FunctionalInterface
-    public interface SegmentCollider {
-        @Nullable Hit firstHit(Vector from, Vector to);
     }
 
     private HeroGiftPolicy() {
@@ -170,32 +167,53 @@ public final class HeroGiftPolicy {
     }
 
     /**
-     * Whether a gift thrown from {@code start} escapes the villager's cell. Steps the item along
-     * vanilla's item physics, tracing each tick's segment, and accepts the throw only if the item's
-     * first contact is landing on a block top outside the villager's own block. Hitting a wall or
-     * ceiling, or landing back in the villager's block, means it would stay in the cell. An item
-     * still in the air after {@link #MAX_THROW_TICKS} has cleared everything nearby. The item is
-     * treated as a point at its bottom center, the part a low barrier catches first.
+     * Whether a gift thrown from {@code start} escapes the villager's cell. Moves the item's real
+     * collision box along vanilla's item physics in substeps of at most {@link #MAX_THROW_SUBSTEP},
+     * resolving vertical movement before horizontal as vanilla's entity movement does. The throw is
+     * accepted only if the item first lands on a block top with its center outside the villager's
+     * own block. Hitting a wall, a ceiling or anything else on the way, starting inside a block, or
+     * landing back in the villager's block means it would stay in the cell. An item still in the
+     * air after {@link #MAX_THROW_TICKS} has cleared everything nearby.
      *
+     * @param start            the item's position (bottom center of its box)
      * @param villagerPosition the villager's feet, whose block is the one the gift must leave
+     * @param collides         whether a box overlaps anything the item would collide with
      */
-    public static boolean throwEscapes(Vector start, Vector velocity, Vector villagerPosition, SegmentCollider collider) {
+    public static boolean throwEscapes(Vector start, Vector velocity, Vector villagerPosition,
+                                       Predicate<BoundingBox> collides) {
         Vector position = start.clone();
+        if (collides.test(itemBox(position))) {
+            return false;
+        }
         Vector motion = velocity.clone();
         for (int tick = 0; tick < MAX_THROW_TICKS; tick++) {
             motion.setY(motion.getY() - ITEM_GRAVITY);
-            Vector next = position.clone().add(motion);
-            Hit hit = collider.firstHit(position, next);
-            if (hit != null) {
-                boolean landed = hit.normal().getY() > 0.5;
-                boolean leftVillagerBlock = hit.point().getBlockX() != villagerPosition.getBlockX()
-                        || hit.point().getBlockZ() != villagerPosition.getBlockZ();
-                return landed && leftVillagerBlock;
+            int substeps = Math.max(1, (int) Math.ceil(motion.length() / MAX_THROW_SUBSTEP));
+            Vector step = motion.clone().multiply(1.0 / substeps);
+            for (int i = 0; i < substeps; i++) {
+                if (collides.test(itemBox(position.clone().add(new Vector(0.0, step.getY(), 0.0))))) {
+                    // Falling onto something lands the item; rising into something is a ceiling.
+                    return step.getY() < 0.0
+                            && (position.getBlockX() != villagerPosition.getBlockX()
+                            || position.getBlockZ() != villagerPosition.getBlockZ());
+                }
+                position.setY(position.getY() + step.getY());
+                if (collides.test(itemBox(position.clone().add(new Vector(step.getX(), 0.0, step.getZ()))))) {
+                    return false;
+                }
+                position.setX(position.getX() + step.getX());
+                position.setZ(position.getZ() + step.getZ());
             }
-            position = next;
             motion.multiply(ITEM_DRAG);
         }
         return true;
+    }
+
+    /** An item entity's collision box, 0.25 blocks on each side, standing on {@code position}. */
+    static BoundingBox itemBox(Vector position) {
+        return new BoundingBox(
+                position.getX() - ITEM_HALF_WIDTH, position.getY(), position.getZ() - ITEM_HALF_WIDTH,
+                position.getX() + ITEM_HALF_WIDTH, position.getY() + ITEM_HEIGHT, position.getZ() + ITEM_HALF_WIDTH);
     }
 
     /** The first gift delay for a villager that has not seen a hero since it loaded. */

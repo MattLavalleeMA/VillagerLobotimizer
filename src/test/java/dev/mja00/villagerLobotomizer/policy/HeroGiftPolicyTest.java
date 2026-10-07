@@ -1,10 +1,9 @@
 package dev.mja00.villagerLobotomizer.policy;
 
 import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.GiftClock;
-import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.Hit;
-import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.SegmentCollider;
 import dev.mja00.villagerLobotomizer.policy.HeroGiftPolicy.Step;
 import org.bukkit.loot.LootTables;
+import org.bukkit.util.BoundingBox;
 import org.bukkit.util.Vector;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +12,7 @@ import java.util.Random;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -196,6 +196,23 @@ class HeroGiftPolicyTest {
     }
 
     @Test
+    void theItemsWidthCatchesAThinObstacleItsCenterWouldMiss() {
+        // An open trapdoor beside the path: the item's center at z=0.25 passes it, but its box
+        // (z 0.125-0.375) does not, so the gift would hit it while still in the villager's block.
+        Vector offCenter = new Vector(0.5, THROW_FROM.getY(), 0.25);
+        double[] trapdoor = {1, 65, 0, 2, 66, 3.0 / 16};
+        assertFalse(HeroGiftPolicy.throwEscapes(offCenter, EAST, VILLAGER, boxes(FLOOR, trapdoor)));
+        assertTrue(HeroGiftPolicy.throwEscapes(new Vector(0.5, THROW_FROM.getY(), 0.5), EAST, VILLAGER,
+                boxes(FLOOR, trapdoor)), "thrown from the middle of the block, the item clears it");
+    }
+
+    @Test
+    void aThrowStartingInsideABlockIsBlocked() {
+        double[] lowCeiling = {0, 65, 0, 1, 66, 1};
+        assertFalse(HeroGiftPolicy.throwEscapes(THROW_FROM, EAST, VILLAGER, boxes(FLOOR, lowCeiling)));
+    }
+
+    @Test
     void aGiftLandingInTheVillagersOwnBlockIsBlocked() {
         assertFalse(HeroGiftPolicy.throwEscapes(THROW_FROM, new Vector(), VILLAGER, boxes(FLOOR)),
                 "a hero standing in the villager's spot gets nothing thrown; the gift drops at their feet");
@@ -203,51 +220,15 @@ class HeroGiftPolicyTest {
 
     @Test
     void aThrowThatNeverLandsHasClearedTheCell() {
-        assertTrue(HeroGiftPolicy.throwEscapes(THROW_FROM, EAST, VILLAGER, (from, to) -> null));
+        assertTrue(HeroGiftPolicy.throwEscapes(THROW_FROM, EAST, VILLAGER, box -> false));
     }
 
-    /** Axis-aligned boxes {minX, minY, minZ, maxX, maxY, maxZ}, hit with the slab method. */
-    private static SegmentCollider boxes(double[]... boxes) {
-        List<double[]> list = List.of(boxes);
-        return (from, to) -> {
-            double[] p = {from.getX(), from.getY(), from.getZ()};
-            double[] d = {to.getX() - p[0], to.getY() - p[1], to.getZ() - p[2]};
-            Hit best = null;
-            double bestT = Double.MAX_VALUE;
-            for (double[] box : list) {
-                double enter = 0.0;
-                double exit = 1.0;
-                int enterAxis = -1;
-                boolean miss = false;
-                for (int axis = 0; axis < 3 && !miss; axis++) {
-                    double min = box[axis];
-                    double max = box[axis + 3];
-                    if (Math.abs(d[axis]) < 1.0E-12) {
-                        miss = p[axis] < min || p[axis] > max;
-                        continue;
-                    }
-                    double t1 = (min - p[axis]) / d[axis];
-                    double t2 = (max - p[axis]) / d[axis];
-                    double near = Math.min(t1, t2);
-                    double far = Math.max(t1, t2);
-                    if (near > enter) {
-                        enter = near;
-                        enterAxis = axis;
-                    }
-                    exit = Math.min(exit, far);
-                    miss = enter > exit;
-                }
-                if (miss || enterAxis < 0 || enter >= bestT) {
-                    continue;
-                }
-                double[] normal = new double[3];
-                normal[enterAxis] = d[enterAxis] > 0 ? -1.0 : 1.0;
-                bestT = enter;
-                best = new Hit(new Vector(p[0] + d[0] * enter, p[1] + d[1] * enter, p[2] + d[2] * enter),
-                        new Vector(normal[0], normal[1], normal[2]));
-            }
-            return best;
-        };
+    /** Axis-aligned boxes {minX, minY, minZ, maxX, maxY, maxZ}; touching faces do not collide. */
+    private static Predicate<BoundingBox> boxes(double[]... boxes) {
+        List<BoundingBox> list = java.util.Arrays.stream(boxes)
+                .map(b -> new BoundingBox(b[0], b[1], b[2], b[3], b[4], b[5]))
+                .toList();
+        return item -> list.stream().anyMatch(item::overlaps);
     }
 
     @Test

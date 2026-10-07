@@ -14,13 +14,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
-import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -31,7 +31,6 @@ import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.BoundingBox;
-import org.bukkit.util.RayTraceResult;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
@@ -84,7 +83,8 @@ public class LobotomizeStorage {
     private final boolean heroGiftsEnabled;
     private HeroGiftLoot heroGiftLoot = HeroGiftLoot.vanilla();
     private BiPredicate<Villager, Player> heroVisibility = (villager, player) -> villager.hasLineOfSight(player);
-    private Function<World, HeroGiftPolicy.SegmentCollider> throwCollider = LobotomizeStorage::blockCollider;
+    /** What a thrown gift collides with: blocks' collision shapes, hard entities and the world border. */
+    private Function<World, Predicate<BoundingBox>> throwCollider = world -> world::hasCollisionsIn;
     /**
      * Records the villager as the gift's thrower, as vanilla does. Picking the item up then fires the
      * {@code thrown_item_picked_up_by_player} advancement trigger with the villager as its entity.
@@ -987,10 +987,8 @@ public class LobotomizeStorage {
             }
             Location villagerLocation = villager.getLocation();
             Location heroLocation = hero.getLocation();
-            if (!HeroGiftPolicy.isCandidate(heroLocation.distanceSquared(villagerLocation),
-                    hero.hasPotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE),
-                    hero.getGameMode() == GameMode.SPECTATOR)
-                    || !this.heroVisibility.test(villager, hero)) {
+            double distanceSquared = heroLocation.distanceSquared(villagerLocation);
+            if (!canSeeHero(villager, hero, distanceSquared)) {
                 return;
             }
             HeroGiftPolicy.GiftClock clock = this.heroGiftClocks.computeIfAbsent(villager.getUniqueId(),
@@ -1000,9 +998,18 @@ public class LobotomizeStorage {
                     heroLocation.getBlockY() - villagerLocation.getBlockY(),
                     heroLocation.getBlockZ() - villagerLocation.getBlockZ());
             HeroGiftPolicy.Step step = HeroGiftPolicy.onSighting(clock, villager.getWorld().getGameTime(),
-                    hero.getUniqueId(), heroLocation.distanceSquared(villagerLocation), inRange);
+                    hero.getUniqueId(), distanceSquared, inRange);
             if (step == HeroGiftPolicy.Step.WAIT) {
                 return;
+            }
+            if (step == HeroGiftPolicy.Step.GIVE) {
+                // Vanilla throws to its nearest visible hero. One that came closer since this hero
+                // was picked may not have been scanned yet, so hand over to it (turning first) instead.
+                Player closer = closerVisibleHero(villager, hero, distanceSquared);
+                if (closer != null) {
+                    offerHeroGift(villager, closer);
+                    return;
+                }
             }
             faceHero(villager, hero, villager.getWorld().getGameTime());
             if (step != HeroGiftPolicy.Step.GIVE) {
@@ -1015,6 +1022,43 @@ public class LobotomizeStorage {
             this.logger.log(java.util.logging.Level.WARNING, e,
                     () -> "Could not give a hero gift from villager " + villager.getUniqueId());
         }
+    }
+
+    private boolean canSeeHero(@NotNull Villager villager, @NotNull Player hero, double distanceSquared) {
+        return HeroGiftPolicy.isCandidate(distanceSquared,
+                hero.hasPotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE),
+                hero.getGameMode() == GameMode.SPECTATOR)
+                && this.heroVisibility.test(villager, hero);
+    }
+
+    /**
+     * The closest other hero the villager can see, if any is closer than {@code recipient}. Only
+     * heroes owned by this region are considered; on Folia any hero in view of the villager is.
+     */
+    private @Nullable Player closerVisibleHero(@NotNull Villager villager, @NotNull Player recipient,
+                                               double recipientDistanceSquared) {
+        HeroTracker heroes = this.plugin.getHeroTracker();
+        if (heroes == null) {
+            return null;
+        }
+        Location villagerLocation = villager.getLocation();
+        Player closest = null;
+        double closestDistanceSquared = recipientDistanceSquared;
+        for (UUID id : heroes.candidates()) {
+            if (id.equals(recipient.getUniqueId())) {
+                continue;
+            }
+            Player other = Bukkit.getPlayer(id);
+            if (other == null || other.getWorld() != villager.getWorld() || !Bukkit.isOwnedByCurrentRegion(other)) {
+                continue;
+            }
+            double distanceSquared = other.getLocation().distanceSquared(villagerLocation);
+            if (distanceSquared < closestDistanceSquared && canSeeHero(villager, other, distanceSquared)) {
+                closest = other;
+                closestDistanceSquared = distanceSquared;
+            }
+        }
+        return closest;
     }
 
     /**
@@ -1108,23 +1152,6 @@ public class LobotomizeStorage {
         }
     }
 
-    /** Traces a straight segment against the world's colliding blocks, as an item would collide. */
-    private static HeroGiftPolicy.SegmentCollider blockCollider(@NotNull World world) {
-        return (from, to) -> {
-            Vector direction = to.clone().subtract(from);
-            double distance = direction.length();
-            if (distance < 1.0E-9) {
-                return null;
-            }
-            RayTraceResult result = world.rayTraceBlocks(from.toLocation(world), direction, distance,
-                    FluidCollisionMode.NEVER, true);
-            if (result == null || result.getHitBlockFace() == null) {
-                return null;
-            }
-            return new HeroGiftPolicy.Hit(result.getHitPosition(), result.getHitBlockFace().getDirection());
-        };
-    }
-
     /** For /lobotomy debug: the villager's hero-gift status. Entity-thread only. */
     public @NotNull String describeHeroGift(@NotNull Villager villager) {
         if (!this.heroGiftsEnabled) {
@@ -1152,7 +1179,7 @@ public class LobotomizeStorage {
     }
 
     /** Test seam: MockBukkit does not implement ray tracing. */
-    void setThrowCollider(@NotNull Function<World, HeroGiftPolicy.SegmentCollider> throwCollider) {
+    void setThrowCollider(@NotNull Function<World, Predicate<BoundingBox>> throwCollider) {
         this.throwCollider = throwCollider;
     }
 

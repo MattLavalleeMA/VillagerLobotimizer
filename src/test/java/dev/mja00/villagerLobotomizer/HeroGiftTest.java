@@ -77,9 +77,8 @@ class HeroGiftTest extends MockBukkitTestBase {
             return List.of(new ItemStack(Material.BOOK));
         });
         storage.setHeroVisibility((v, player) -> heroVisible);
-        // Open air, or a wall right in front of the villager that the first tick of the throw hits.
-        storage.setThrowCollider(w -> (from, to) -> throwPathClear ? null
-                : new HeroGiftPolicy.Hit(from.clone(), new Vector(-1, 0, 0)));
+        // Open air, or a cell the item cannot get out of.
+        storage.setThrowCollider(w -> box -> !throwPathClear);
         throwers.clear();
         storage.setRecordThrower(throwers::put);
     }
@@ -286,6 +285,26 @@ class HeroGiftTest extends MockBukkitTestBase {
         world.setGameTime(1000L + 2 * SCAN);
         plugin.getStorage().offerHeroGift(villager, near);
         assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
+    }
+
+    @Test
+    void aCloserHeroArrivingBeforeItsFirstScanGetsTheGiftInstead() {
+        // The first hero is already in range and faced, and scans first: the gift still goes to the
+        // closer hero, after the villager turns to it.
+        startClockAt(0L);
+        offerAt(1000L);
+        PlayerMock closer = server.addPlayer();
+        closer.teleport(new Location(world, 8, 64, 9));
+        closer.addPotionEffect(new PotionEffect(PotionEffectType.HERO_OF_THE_VILLAGE, 6000, 0));
+
+        offerAt(1000L + SCAN);
+        assertTrue(rolledTables.isEmpty(), "no throw at the farther hero");
+        assertEquals(0f, villager.getLocation().getYaw(), 0.5f, "turned south, to the closer hero");
+
+        world.setGameTime(1000L + 2 * SCAN);
+        plugin.getStorage().offerHeroGift(villager, closer);
+        assertEquals(List.of(LootTables.LIBRARIAN_GIFT), rolledTables);
+        assertTrue(droppedItems().get(0).getVelocity().getZ() > 0.0, "thrown toward the closer hero");
     }
 
     @Test
