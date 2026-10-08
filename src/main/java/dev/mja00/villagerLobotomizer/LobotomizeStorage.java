@@ -98,12 +98,14 @@ public class LobotomizeStorage {
     static final long HEAD_TURN_BACK_TICKS = HeroGiftPolicy.SCAN_INTERVAL_TICKS + 10L;
 
     private static final class TurnedHead {
+        final Villager villager;
         final float yaw;
         final float pitch;
         long lastFacedTick;
         boolean turnBackScheduled;
 
-        TurnedHead(float yaw, float pitch) {
+        TurnedHead(Villager villager, float yaw, float pitch) {
+            this.villager = villager;
             this.yaw = yaw;
             this.pitch = pitch;
         }
@@ -546,6 +548,7 @@ public class LobotomizeStorage {
             this.inactiveVillagers.clear();
             this.activeVillagers.clear();
         }
+        restoreTurnedHeads();
 
         // Leave both the no-AI state and the marker in place across a restart, or every trading hall
         // is un-lobotomized on boot and the lag spike comes back until check-interval elapses.
@@ -1073,7 +1076,7 @@ public class LobotomizeStorage {
         }
         Location current = villager.getLocation();
         TurnedHead head = this.turnedHeads.computeIfAbsent(villager.getUniqueId(),
-                id -> new TurnedHead(current.getYaw(), current.getPitch()));
+                id -> new TurnedHead(villager, current.getYaw(), current.getPitch()));
         head.lastFacedTick = now;
         eyes.setDirection(toHero);
         villager.setRotation(eyes.getYaw(), eyes.getPitch());
@@ -1089,6 +1092,22 @@ public class LobotomizeStorage {
         } catch (IllegalPluginAccessException e) {
             return false;
         }
+    }
+
+    /**
+     * Best effort: puts back heads still turned toward a hero when tracking stops, since the pending
+     * turn-back tasks die with the plugin and the villager would be saved facing the hero. Only
+     * villagers this thread owns are touched: all of them on Paper's main thread, none on Folia,
+     * whose villagers keep the turned head.
+     */
+    private void restoreTurnedHeads() {
+        for (TurnedHead head : this.turnedHeads.values()) {
+            Villager villager = head.villager;
+            if (Bukkit.isOwnedByCurrentRegion(villager) && villager.isValid() && !villager.isAware()) {
+                villager.setRotation(head.yaw, head.pitch);
+            }
+        }
+        this.turnedHeads.clear();
     }
 
     /**

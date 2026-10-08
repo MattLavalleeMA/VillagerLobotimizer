@@ -155,6 +155,18 @@ class HeroGiftTest extends MockBukkitTestBase {
     }
 
     @Test
+    void shutdownPutsBackAHeadStillTurnedTowardAHero() {
+        villager.setRotation(90f, 0f);
+        giveReadyGift();
+        assertEquals(-90f, villager.getLocation().getYaw(), 0.5f, "faced the hero to throw");
+
+        // Before the turn-back task runs, which a real shutdown would cancel.
+        plugin.getStorage().flush(LobotomizeStorage.FlushMode.SHUTDOWN);
+
+        assertEquals(90f, villager.getLocation().getYaw(), 0.5f, "not saved facing the hero");
+    }
+
+    @Test
     void headStaysOnAHeroItIsStillWatching() {
         hero.teleport(new Location(world, 18, 64, 8));
         villager.setRotation(90f, 0f);

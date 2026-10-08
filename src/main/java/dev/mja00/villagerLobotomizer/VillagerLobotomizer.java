@@ -41,7 +41,7 @@ import java.util.concurrent.TimeUnit;
 public class VillagerLobotomizer extends JavaPlugin {
     private boolean debugging = false;
     private boolean chunkDebugging = false;
-    private LobotomizeStorage storage;
+    private volatile LobotomizeStorage storage;
     private HeroTracker heroTracker;
     private boolean isFolia;
     static final HttpRequest request = HttpRequest.newBuilder().GET().uri(URI.create("https://api.modrinth.com/v3/project/villagerlobotomy/version")).build();
