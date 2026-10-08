@@ -174,7 +174,8 @@ public final class HeroGiftPolicy {
      * is accepted only if the item first lands on a block top with its center outside the villager's
      * own block. Hitting a wall, a ceiling or anything else on the way, starting inside a block, or
      * landing back in the villager's block means it would stay in the cell. An item still in the
-     * air after {@link #MAX_THROW_TICKS} has cleared everything nearby.
+     * air after {@link #MAX_THROW_TICKS} has cleared everything nearby if it has left the villager's
+     * block column; still above or below it, it would come down in the cell.
      *
      * @param start            the item's position (bottom center of its box)
      * @param villagerPosition the villager's feet, whose block is the one the gift must leave
@@ -191,9 +192,7 @@ public final class HeroGiftPolicy {
             motion.setY(motion.getY() - ITEM_GRAVITY);
             if (!sweep(position, 0.0, motion.getY(), 0.0, collides)) {
                 // Falling onto something lands the item; rising into something is a ceiling.
-                return motion.getY() < 0.0
-                        && (position.getBlockX() != villagerPosition.getBlockX()
-                        || position.getBlockZ() != villagerPosition.getBlockZ());
+                return motion.getY() < 0.0 && leftColumn(position, villagerPosition);
             }
             boolean xFirst = Math.abs(motion.getX()) >= Math.abs(motion.getZ());
             double firstX = xFirst ? motion.getX() : 0.0;
@@ -204,7 +203,12 @@ public final class HeroGiftPolicy {
             }
             motion.multiply(ITEM_DRAG);
         }
-        return true;
+        return leftColumn(position, villagerPosition);
+    }
+
+    private static boolean leftColumn(Vector position, Vector villagerPosition) {
+        return position.getBlockX() != villagerPosition.getBlockX()
+                || position.getBlockZ() != villagerPosition.getBlockZ();
     }
 
     /**

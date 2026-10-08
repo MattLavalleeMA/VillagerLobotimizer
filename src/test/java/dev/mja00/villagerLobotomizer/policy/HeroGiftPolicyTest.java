@@ -234,6 +234,16 @@ class HeroGiftPolicyTest {
         assertTrue(HeroGiftPolicy.throwEscapes(THROW_FROM, EAST, VILLAGER, box -> false));
     }
 
+    @Test
+    void aThrowStillOverTheVillagersBlockAtTheTimeoutHasNotEscaped() {
+        // Straight up, toward a hero directly above, with the floor far below: still airborne after
+        // the simulation ends, but it would come down in the villager's own column.
+        Vector from = new Vector(0.4, 65.32, 0.5);
+        Vector up = new Vector(0.0, HeroGiftPolicy.THROW_SPEED, 0.0);
+        double[] deepFloor = {-8, 43, -8, 8, 44, 8};
+        assertFalse(HeroGiftPolicy.throwEscapes(from, up, VILLAGER, boxes(deepFloor)));
+    }
+
     /** Axis-aligned boxes {minX, minY, minZ, maxX, maxY, maxZ}; touching faces do not collide. */
     private static Predicate<BoundingBox> boxes(double[]... boxes) {
         List<BoundingBox> list = java.util.Arrays.stream(boxes)
