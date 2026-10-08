@@ -168,9 +168,10 @@ public final class HeroGiftPolicy {
 
     /**
      * Whether a gift thrown from {@code start} escapes the villager's cell. Moves the item's real
-     * collision box along vanilla's item physics in substeps of at most {@link #MAX_THROW_SUBSTEP},
-     * resolving vertical movement before horizontal as vanilla's entity movement does. The throw is
-     * accepted only if the item first lands on a block top with its center outside the villager's
+     * collision box along vanilla's item physics. Like vanilla's entity movement, each tick moves the
+     * full vertical displacement first, then the larger horizontal axis, then the other; every axis
+     * is swept in substeps of at most {@link #MAX_THROW_SUBSTEP} so nothing thin is skipped. The throw
+     * is accepted only if the item first lands on a block top with its center outside the villager's
      * own block. Hitting a wall, a ceiling or anything else on the way, starting inside a block, or
      * landing back in the villager's block means it would stay in the cell. An item still in the
      * air after {@link #MAX_THROW_TICKS} has cleared everything nearby.
@@ -188,23 +189,42 @@ public final class HeroGiftPolicy {
         Vector motion = velocity.clone();
         for (int tick = 0; tick < MAX_THROW_TICKS; tick++) {
             motion.setY(motion.getY() - ITEM_GRAVITY);
-            int substeps = Math.max(1, (int) Math.ceil(motion.length() / MAX_THROW_SUBSTEP));
-            Vector step = motion.clone().multiply(1.0 / substeps);
-            for (int i = 0; i < substeps; i++) {
-                if (collides.test(itemBox(position.clone().add(new Vector(0.0, step.getY(), 0.0))))) {
-                    // Falling onto something lands the item; rising into something is a ceiling.
-                    return step.getY() < 0.0
-                            && (position.getBlockX() != villagerPosition.getBlockX()
-                            || position.getBlockZ() != villagerPosition.getBlockZ());
-                }
-                position.setY(position.getY() + step.getY());
-                if (collides.test(itemBox(position.clone().add(new Vector(step.getX(), 0.0, step.getZ()))))) {
-                    return false;
-                }
-                position.setX(position.getX() + step.getX());
-                position.setZ(position.getZ() + step.getZ());
+            if (!sweep(position, 0.0, motion.getY(), 0.0, collides)) {
+                // Falling onto something lands the item; rising into something is a ceiling.
+                return motion.getY() < 0.0
+                        && (position.getBlockX() != villagerPosition.getBlockX()
+                        || position.getBlockZ() != villagerPosition.getBlockZ());
+            }
+            boolean xFirst = Math.abs(motion.getX()) >= Math.abs(motion.getZ());
+            double firstX = xFirst ? motion.getX() : 0.0;
+            double firstZ = xFirst ? 0.0 : motion.getZ();
+            if (!sweep(position, firstX, 0.0, firstZ, collides)
+                    || !sweep(position, motion.getX() - firstX, 0.0, motion.getZ() - firstZ, collides)) {
+                return false;
             }
             motion.multiply(ITEM_DRAG);
+        }
+        return true;
+    }
+
+    /**
+     * Moves {@code position} by the given displacement in substeps, stopping at the last free spot.
+     *
+     * @return {@code false} if the item's box collided on the way
+     */
+    private static boolean sweep(Vector position, double dx, double dy, double dz, Predicate<BoundingBox> collides) {
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (distance == 0.0) {
+            return true;
+        }
+        int substeps = (int) Math.ceil(distance / MAX_THROW_SUBSTEP);
+        Vector step = new Vector(dx / substeps, dy / substeps, dz / substeps);
+        for (int i = 0; i < substeps; i++) {
+            Vector next = position.clone().add(step);
+            if (collides.test(itemBox(next))) {
+                return false;
+            }
+            position.copy(next);
         }
         return true;
     }

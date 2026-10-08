@@ -196,6 +196,17 @@ class HeroGiftPolicyTest {
     }
 
     @Test
+    void theWholeDropIsResolvedBeforeMovingSideways() {
+        // Resolving each tick's drop first, as vanilla does, puts the item below this counter's top
+        // (y~64.93) when it reaches it: a side hit. Mixing vertical and horizontal substeps would
+        // instead see it pass over the edge while still above the top and call it a landing.
+        Vector villager = new Vector(0.9, 64.0, 0.5);
+        Vector from = new Vector(0.9, 65.32, 0.5);
+        double[] counter = {2, 64, -1, 3, 65, 2};
+        assertFalse(HeroGiftPolicy.throwEscapes(from, EAST, villager, boxes(FLOOR, counter)));
+    }
+
+    @Test
     void theItemsWidthCatchesAThinObstacleItsCenterWouldMiss() {
         // An open trapdoor beside the path: the item's center at z=0.25 passes it, but its box
         // (z 0.125-0.375) does not, so the gift would hit it while still in the villager's block.
